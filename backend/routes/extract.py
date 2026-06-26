@@ -1,15 +1,19 @@
 """
 routes/extract.py — Fillosophy FastAPI Backend
 
-Handles resume file uploads and text extraction.
+Handles resume file uploads, AI-powered profile extraction, and DB persistence.
 
 POST /extract
     Accepts a PDF resume and a profile name, extracts all readable text
-    from the PDF using pdfplumber, and returns the structured result.
+    via pdfplumber, runs Claude AI extraction to produce a structured
+    profile dict, saves it to the active database backend, and returns
+    the full result.
 """
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 
+from database.profiles import save_profile
+from utils.ai_client import extract_profile_from_text
 from utils.pdf_parser import extract_text_from_pdf
 
 router = APIRouter()
@@ -17,16 +21,15 @@ router = APIRouter()
 
 @router.post(
     "/",
-    summary="Upload a PDF resume and extract its text",
-    response_description="Parsed text and metadata from the uploaded resume",
+    summary="Upload a PDF resume, extract text, and build a structured profile via AI",
+    response_description="Structured profile extracted by Claude, persisted to the database",
 )
 async def extract_resume(
     file: UploadFile = File(..., description="Resume PDF file"),
     profile_name: str = Form(..., description="Label for this profile, e.g. 'Academic'"),
 ) -> dict:
     """
-    Accepts a multipart PDF upload and a profile name, extracts all readable
-    text from the document, and returns a structured JSON response.
+    Full extraction pipeline: PDF → raw text → AI profile → database.
 
     Args:
         file:         The uploaded resume — must be a PDF.
@@ -34,21 +37,21 @@ async def extract_resume(
 
     Returns:
         dict containing:
-            status       — "parsed"
+            status       — "success"
             profile_name — echoed label
-            char_count   — total characters in the extracted text
-            preview      — first 300 characters of the extracted text
-            raw_text     — full extracted text string
+            profile      — full structured profile dict returned by Claude
+            char_count   — total characters in the extracted raw text
+            preview      — first 300 characters of the extracted raw text
 
     Raises:
         HTTP 400: File is not a PDF.
         HTTP 422: PDF contains no extractable text (e.g. scanned image).
-        HTTP 500: Unexpected error during parsing.
+        HTTP 502: Claude AI extraction failed.
+        HTTP 500: Profile could not be persisted to the database.
     """
-    # ── Step 1: log receipt ───────────────────────────────────
-    print(f"[Fillosophy /extract] Received: {file.filename}, profile: {profile_name}")
+    print(f"[Fillosophy /extract] Received: {file.filename!r}, profile: {profile_name!r}")
 
-    # ── Step 2: validate PDF ──────────────────────────────────
+    # ── Step 1: validate PDF ──────────────────────────────────────────────────
     is_pdf_mime     = (file.content_type or "").lower() == "application/pdf"
     is_pdf_filename = (file.filename or "").lower().endswith(".pdf")
 
@@ -62,43 +65,51 @@ async def extract_resume(
             detail="Only PDF files are accepted.",
         )
 
-    # ── Step 3: read bytes ────────────────────────────────────
-    print(f"[Fillosophy /extract] Reading file bytes …")
+    # ── Step 2: read file bytes ───────────────────────────────────────────────
     contents = await file.read()
     print(f"[Fillosophy /extract] Read {len(contents):,} bytes from '{file.filename}'")
 
-    # ── Step 4 & 5: extract text, handle empty PDF ────────────
+    # ── Step 3: extract raw text from PDF ────────────────────────────────────
     try:
-        print(f"[Fillosophy /extract] Running PDF text extraction …")
-        extracted_text = extract_text_from_pdf(contents)
-
+        raw_text = extract_text_from_pdf(contents)
     except ValueError as exc:
-        # No readable text found (scanned image, empty pages, etc.)
-        print(f"[Fillosophy /extract] Extraction failed (no text): {exc}")
+        print(f"[Fillosophy /extract] PDF extraction failed (no text): {exc}")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=str(exc),
         )
 
-    except Exception as exc:
-        # Unexpected error (corrupt PDF, pdfplumber crash, etc.)
-        print(f"[Fillosophy /extract] Unexpected error during extraction: {exc}")
+    print(f"[Fillosophy /extract] PDF parsed: {len(raw_text)} chars")
+
+    # ── Step 4: AI profile extraction via Claude ──────────────────────────────
+    try:
+        profile_data = extract_profile_from_text(raw_text)
+    except (RuntimeError, ValueError) as exc:
+        print(f"[Fillosophy /extract] AI extraction failed: {exc}")
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"An unexpected error occurred while parsing the PDF: {exc}",
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"AI extraction failed: {exc}",
         )
 
-    # ── Step 6: return structured result ─────────────────────
-    char_count = len(extracted_text)
-    print(
-        f"[Fillosophy /extract] Success — profile: '{profile_name}', "
-        f"chars: {char_count:,}"
-    )
+    print(f"[Fillosophy /extract] AI extraction complete: {profile_name}")
 
+    # ── Step 5: persist profile to the active database backend ───────────────
+    try:
+        save_profile(profile_name, profile_data)
+    except RuntimeError as exc:
+        print(f"[Fillosophy /extract] DB save failed: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Profile could not be saved: {exc}",
+        )
+
+    print(f"[Fillosophy /extract] Profile saved to DB: {profile_name}")
+
+    # ── Step 6: return structured result ─────────────────────────────────────
     return {
-        "status":       "parsed",
+        "status":       "success",
         "profile_name": profile_name,
-        "char_count":   char_count,
-        "preview":      extracted_text[:300],
-        "raw_text":     extracted_text,
+        "profile":      profile_data,
+        "char_count":   len(raw_text),
+        "preview":      raw_text[:300],
     }

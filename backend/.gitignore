@@ -1,0 +1,17 @@
+# Fillosophy — Backend .gitignore
+
+# Environment variables — never commit secrets
+.env
+
+# SQLite database file — local state only
+fillosophy.db
+
+# Python bytecode
+__pycache__/
+*.pyc
+
+# Virtual environment
+.venv/
+
+# Test bytecode
+tests/__pycache__/

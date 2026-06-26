@@ -10,6 +10,85 @@ import {
 /** Base URL of the local FastAPI backend. */
 const BACKEND_BASE_URL = 'http://localhost:8000';
 
+// ─── Tab helpers ───────────────────────────────────────────────
+
+/**
+ * Returns the currently active tab in the focused window.
+ *
+ * @returns {Promise<chrome.tabs.Tab>}
+ * @throws {Error} If no active tab is found.
+ */
+async function getActiveTab() {
+  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!tabs || tabs.length === 0) {
+    throw new Error('No active tab found');
+  }
+  return tabs[0];
+}
+
+/**
+ * Sends a message to the content script running in the given tab.
+ * Throws a descriptive error if the content script is not reachable
+ * (e.g. on chrome:// pages or tabs where injection is blocked).
+ *
+ * @param {number} tabId
+ * @param {Object} message
+ * @returns {Promise<any>} The response from the content script.
+ */
+async function sendToContentScript(tabId, message) {
+  try {
+    const response = await chrome.tabs.sendMessage(tabId, message);
+    return response;
+  } catch (error) {
+    throw new Error(`Content script not reachable on this tab: ${error.message}`);
+  }
+}
+
+/**
+ * Ensures the Fillosophy content script is running in the given tab.
+ *
+ * Strategy:
+ *   1. Send a PING — if the content script is already present it responds
+ *      immediately and we return true without any injection.
+ *   2. If the PING throws (no listener), programmatically inject
+ *      content/content.js via chrome.scripting.executeScript.
+ *   3. If injection also fails (chrome://, extension pages, PDFs, etc.)
+ *      log the error and return false so callers can surface a user-friendly
+ *      message instead of propagating a cryptic Chrome error.
+ *
+ * @param {number} tabId
+ * @returns {Promise<boolean>} true if the content script is ready, false if
+ *                            the tab cannot be scripted.
+ */
+async function ensureContentScript(tabId) {
+  // Step 1 — PING: already injected?
+  try {
+    const pong = await chrome.tabs.sendMessage(tabId, { type: 'PING' });
+    if (pong?.status === 'content_script_ready') {
+      return true;
+    }
+  } catch {
+    // No listener — content script not present yet, fall through to injection
+  }
+
+  // Step 2 — Programmatic injection
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files:  ['content/content.js'],
+    });
+    console.log(`[Fillosophy SW] Content script injected into tab ${tabId}`);
+    return true;
+  } catch (injectionErr) {
+    // Step 3 — Unscriptable page (chrome://, extension pages, PDFs…)
+    console.warn(
+      `[Fillosophy SW] Cannot inject into tab ${tabId}:`,
+      injectionErr.message
+    );
+    return false;
+  }
+}
+
 // ─── Lifecycle ─────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(({ reason }) => {
@@ -24,37 +103,73 @@ chrome.runtime.onInstalled.addListener(({ reason }) => {
 // ─── Message router ────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  console.log(
-    '[Fillosophy SW] Message received:',
-    message.type,
-    '| from:',
-    sender.tab?.id ?? 'popup'
-  );
+  console.log(`[Fillosophy SW] Message received: ${message.type}`);
 
   switch (message.type) {
 
-    // Fetch the active profile from chrome.storage and return it
-    case 'GET_ACTIVE_PROFILE':
-      handleGetActiveProfile()
-        .then(sendResponse)
-        .catch((err) => sendResponse({ success: false, error: err.message }));
-      return true; // async — keep port open
-
-    // Forward a PING to the active tab's content script
+    // PING_CONTENT — verify the content script is alive on the active tab
     case 'PING_CONTENT':
-      handlePingContent(sender)
-        .then(sendResponse)
-        .catch((err) => sendResponse({ success: false, error: err.message }));
+      getActiveTab()
+        .then((tab) => sendToContentScript(tab.id, { type: 'PING' }))
+        .then((response) => sendResponse(response))
+        .catch((err) => sendResponse({ status: 'error', message: err.message }));
       return true;
 
-    // Set the active profile by name
+    // DETECT_FIELDS — scan the active tab's page for fillable form fields
+    case 'DETECT_FIELDS':
+      getActiveTab()
+        .then(async (tab) => {
+          const ready = await ensureContentScript(tab.id);
+          if (!ready) {
+            sendResponse({ status: 'error', message: 'Cannot inject into this page type' });
+            return;
+          }
+          const response = await sendToContentScript(tab.id, { type: 'DETECT_FIELDS' });
+          sendResponse({ status: 'ok', fields: response.fields, count: response.count });
+        })
+        .catch((err) => sendResponse({ status: 'error', message: err.message }));
+      return true;
+
+    // GET_PAGE_INFO — lightweight metadata about the active tab
+    case 'GET_PAGE_INFO':
+      getActiveTab()
+        .then(async (tab) => {
+          const ready = await ensureContentScript(tab.id);
+          if (!ready) {
+            sendResponse({ status: 'error', message: 'Cannot inject into this page type' });
+            return;
+          }
+          const response = await sendToContentScript(tab.id, { type: 'GET_PAGE_INFO' });
+          sendResponse(response);
+        })
+        .catch((err) =>
+          sendResponse({ status: 'error', url: 'unknown', fieldCount: 0 })
+        );
+      return true;
+
+    // GET_ACTIVE_PROFILE — read active profile name + data from chrome.storage.local
+    case 'GET_ACTIVE_PROFILE':
+      chrome.storage.local.get(['fillosophy_active'], (result) => {
+        const profileName = result?.fillosophy_active?.activeProfile ?? null;
+        if (!profileName) {
+          sendResponse({ status: 'empty' });
+          return;
+        }
+        chrome.storage.local.get([`profile_${profileName}`], (profileResult) => {
+          const profile = profileResult?.[`profile_${profileName}`] ?? null;
+          sendResponse({ status: 'ok', profileName, profile });
+        });
+      });
+      return true;
+
+    // SW_SET_ACTIVE_PROFILE — persist the chosen profile name
     case 'SW_SET_ACTIVE_PROFILE':
       handleSetActiveProfile(message.payload?.name)
         .then(sendResponse)
         .catch((err) => sendResponse({ success: false, error: err.message }));
       return true;
 
-    // Resume extraction relay (wired in Week 3)
+    // SW_EXTRACT_RESUME — relay resume to backend (stub, wired in Week 3)
     case 'SW_EXTRACT_RESUME':
       handleExtractResume(message.payload)
         .then(sendResponse)
@@ -62,49 +177,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
 
     default:
-      console.warn('[Fillosophy SW] Unknown message type:', message.type);
-      // No return true — synchronous / no response needed
+      console.warn(`[Fillosophy SW] Unknown message type: ${message.type}`);
+      sendResponse({ status: 'unhandled' });
+      return true;
   }
 });
 
 // ─── Handlers ──────────────────────────────────────────────────
-
-/**
- * Reads the active profile name and its data from chrome.storage.
- *
- * @returns {Promise<{ success: boolean, name: string|null, profile: object|null }>}
- */
-async function handleGetActiveProfile() {
-  const name    = await getActiveProfile();
-  const profile = name ? await getProfile(name) : null;
-  console.log('[Fillosophy SW] GET_ACTIVE_PROFILE →', name ?? 'none');
-  return { success: true, name, profile };
-}
-
-/**
- * Sends a PING message to the content script on the currently active tab
- * and returns its response.
- *
- * @param {chrome.runtime.MessageSender} _sender - Original message sender (unused).
- * @returns {Promise<{ success: boolean, response?: object, error?: string }>}
- */
-async function handlePingContent(_sender) {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-
-  if (!tab?.id) {
-    return { success: false, error: 'No active tab found.' };
-  }
-
-  try {
-    const response = await chrome.tabs.sendMessage(tab.id, { type: 'PING' });
-    console.log('[Fillosophy SW] PING_CONTENT → tab', tab.id, '→', response);
-    return { success: true, response };
-  } catch (err) {
-    // Content script may not be injected on this page (e.g. chrome:// pages)
-    console.warn('[Fillosophy SW] PING_CONTENT failed on tab', tab.id, ':', err.message);
-    return { success: false, error: err.message };
-  }
-}
 
 /**
  * Sets the active profile name in chrome.storage.

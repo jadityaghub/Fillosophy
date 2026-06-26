@@ -1,18 +1,18 @@
 """
 routes/match.py — Fillosophy FastAPI Backend
 
-Maps detected form fields to the best-matching profile values.
+Maps detected form fields to the best-matching profile values using Claude AI.
 
 POST /match
-    Accepts a stored profile (dict) and a list of field descriptors,
-    then returns a suggested fill value for each field using AI matching.
-
-Current state: placeholder — echoes the field count only.
-Next step: wire up utils/ai_client.match_fields_to_profile().
+    Accepts an active profile (dict) and a list of field label strings
+    collected from the current web page, then returns a confidence-scored
+    fill value for every field.
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+
+from utils.ai_client import match_fields_to_profile
 
 router = APIRouter()
 
@@ -21,25 +21,33 @@ router = APIRouter()
 
 class MatchRequest(BaseModel):
     """
-    Payload sent by the content script with the current page's form fields
-    and the active user profile to match against.
+    Payload sent by the popup with the active profile and the field labels
+    collected from the current page by the content script.
     """
     profile: dict = Field(
         ...,
         description="Structured profile dict as returned by the /extract endpoint.",
         example={
-            "name": "Aditya Jain",
-            "email": "aditya@example.com",
-            "phone": "+91-9999999999",
-            "degree": "B.Tech Computer Science",
-            "cgpa": "9.2",
-            "skills": ["Python", "FastAPI", "React"],
+            "full_name":       "Aditya Jain",
+            "email":           "aditya@example.com",
+            "phone":           "+91-9999999999",
+            "degree":          "B.Tech Computer Science",
+            "cgpa":            9.2,
+            "skills":          ["Python", "FastAPI", "React"],
         },
     )
     fields: list[str] = Field(
         ...,
-        description="List of form field descriptors detected on the page (name, id, placeholder, etc.).",
-        example=["full_name", "email_address", "phone_number", "highest_qualification"],
+        description=(
+            "Best-available label strings for each detected form field, "
+            "collected by collectFieldLabels() in popup.js."
+        ),
+        example=["Full Name", "Email Address", "CGPA", "Degree Program",
+                 "Skills", "Phone Number"],
+    )
+    profile_name: str | None = Field(
+        default=None,
+        description="Name of the active profile — used for logging only.",
     )
 
 
@@ -48,27 +56,68 @@ class MatchRequest(BaseModel):
 @router.post(
     "/",
     summary="Match form fields to profile values",
-    response_description="Suggested fill values keyed by field descriptor",
+    response_description="Confidence-scored fill values keyed by field label",
 )
 async def match_fields(payload: MatchRequest) -> dict:
     """
-    Receives the active profile and a list of form field descriptors,
-    then returns the best-matching profile value for each field.
+    Receives the active profile and a list of form field labels, calls
+    Claude AI to semantically match each label to a profile value, and
+    returns a confidence-scored mapping.
 
     Args:
-        payload: MatchRequest containing the profile dict and field list.
+        payload: MatchRequest containing the profile dict, field label list,
+                 and an optional profile name for logging.
 
     Returns:
-        dict: Matching result with a `matches` map (field → value).
+        dict with keys:
+          - status:          "success"
+          - total_fields:    number of labels submitted
+          - high_confidence: count of entries with confidence >= 80
+          - needs_review:    count of entries with confidence < 70
+          - mapping:         full Claude response (field → {value, confidence})
 
-    TODO: Replace the placeholder with a real call to
-          utils/ai_client.match_fields_to_profile().
+    Raises:
+        HTTP 400 if fields list or profile is empty.
+        HTTP 502 if the AI matching call fails.
     """
-    # ── TODO: AI field matching ───────────────────────────────
-    # matches = await match_fields_to_profile(payload.fields, payload.profile)
 
-    # Placeholder response — real matches dict replaces `fields_received`
+    # ── Validation ────────────────────────────────────────────
+    if len(payload.fields) == 0:
+        raise HTTPException(status_code=400, detail="No field labels provided")
+
+    if not payload.profile:
+        raise HTTPException(status_code=400, detail="Profile is empty")
+
+    # ── AI matching ───────────────────────────────────────────
+    profile_tag = f'"{payload.profile_name}"' if payload.profile_name else "(unnamed)"
+    print(f"[Fillosophy /match] Matching {len(payload.fields)} fields "
+          f"against profile {profile_tag}")
+
+    try:
+        mapping = match_fields_to_profile(payload.profile, payload.fields)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"AI matching failed: {exc}",
+        ) from exc
+
+    # ── Confidence summary ────────────────────────────────────
+    total = len(payload.fields)
+    high  = sum(
+        1 for entry in mapping.values()
+        if isinstance(entry, dict) and entry.get("confidence", 0) >= 80
+    )
+    low   = sum(
+        1 for entry in mapping.values()
+        if isinstance(entry, dict) and entry.get("confidence", 100) < 70
+    )
+
+    print(f"[Fillosophy /match] High: {high} | Review: {low}")
+
     return {
-        "status": "match placeholder",
-        "fields_received": len(payload.fields),
+        "status":          "success",
+        "total_fields":    total,
+        "high_confidence": high,
+        "needs_review":    low,
+        "mapping":         mapping,
     }

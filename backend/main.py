@@ -13,6 +13,11 @@ Interactive docs:
     http://localhost:8000/redoc  (ReDoc)
 """
 
+import os
+
+from dotenv import load_dotenv
+load_dotenv()  # Must run before any import that reads os.getenv()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -46,8 +51,24 @@ app.add_middleware(
 # ─── Startup ───────────────────────────────────────────────────
 @app.on_event("startup")
 def startup():
-    """Initialise the SQLite database on server start."""
+    """Initialise the database and validate required environment variables."""
     init_db()
+
+    # ── Validate Claude API key ────────────────────────────────────────────
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        print("[Fillosophy] WARNING: ANTHROPIC_API_KEY is not set.")
+        print("[Fillosophy] Claude API calls will fail until this is set.")
+    else:
+        masked = api_key[:8] + "..." + api_key[-4:]
+        print(f"[Fillosophy] Claude API key loaded: {masked}")
+
+    # ── Validate Supabase config if selected ──────────────────────────────
+    db_backend = os.getenv("DB_BACKEND", "sqlite")
+    if db_backend == "supabase":
+        if not os.getenv("SUPABASE_URL") or not os.getenv("SUPABASE_KEY"):
+            print("[Fillosophy] ERROR: DB_BACKEND=supabase but credentials missing.")
+            print("[Fillosophy] Set SUPABASE_URL and SUPABASE_KEY in .env")
 
 # ─── Routers ──────────────────────────────────────────────────
 app.include_router(extract_router, prefix="/extract", tags=["Extract"])

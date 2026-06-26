@@ -1,5 +1,7 @@
 // Fillosophy — Popup controller | Tab switching, PDF upload, backend fetch
 
+import { saveProfile, setActiveProfile } from '../utils/storage.js';
+
 // ════════════════════════════════════════════════════════════
 // CONSTANTS
 // ════════════════════════════════════════════════════════════
@@ -17,6 +19,34 @@ const EXTRACT_URL = 'http://localhost:8000/extract';
 const ACCEPTED_MIME = 'application/pdf';
 
 // ════════════════════════════════════════════════════════════
+// CHROME MESSAGING HELPER
+// ════════════════════════════════════════════════════════════
+
+/**
+ * Promise-based wrapper around chrome.runtime.sendMessage.
+ * Rejects if chrome.runtime.lastError is set (e.g. no listener,
+ * service worker not active) so callers can use async/await cleanly.
+ *
+ * @param {string} type    - Message type string.
+ * @param {Object} payload - Optional extra fields merged into the message.
+ * @returns {Promise<any>}
+ */
+function sendMessage(type, payload = {}) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(
+      { type, ...payload },
+      (response) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message));
+        } else {
+          resolve(response);
+        }
+      }
+    );
+  });
+}
+
+// ════════════════════════════════════════════════════════════
 // MODULE STATE
 // ════════════════════════════════════════════════════════════
 
@@ -27,6 +57,42 @@ const ACCEPTED_MIME = 'application/pdf';
  */
 let selectedFile = null;
 
+/**
+ * Holds the most recently extracted profile dict returned by the backend.
+ * Set on successful POST /extract; used by displayProfile().
+ * @type {Object|null}
+ */
+let currentProfile = null;
+
+/**
+ * Module-level maps so switchTab() can be called from anywhere in the file
+ * without needing to pass DOM refs as arguments every time.
+ * Populated in DOMContentLoaded.
+ */
+let _tabBtns   = {};
+let _tabPanels = {};
+
+/**
+ * Full descriptor objects returned by the last DETECT_FIELDS call.
+ * Consumed by the autofill handler in Week 5 to map matches back to elements.
+ * @type {Object[]}
+ */
+let detectedFields = [];
+
+/**
+ * Best-available label string for each detected field.
+ * Sent to the AI /match endpoint as the "fields" payload.
+ * @type {string[]}
+ */
+let fieldLabels = [];
+
+/**
+ * Mapping object returned by the last successful /match call.
+ * Key: field label, Value: { value, confidence }
+ * @type {Object}
+ */
+let fieldMapping = {};
+
 // ════════════════════════════════════════════════════════════
 // INITIALISATION
 // ════════════════════════════════════════════════════════════
@@ -34,10 +100,10 @@ let selectedFile = null;
 document.addEventListener('DOMContentLoaded', () => {
 
   // ── Tab elements ────────────────────────────────────────
-  const tabBtns = Object.fromEntries(
+  _tabBtns = Object.fromEntries(
     TAB_IDS.map((id) => [id, document.getElementById(`tab-${id}`)])
   );
-  const tabPanels = Object.fromEntries(
+  _tabPanels = Object.fromEntries(
     TAB_IDS.map((id) => [id, document.getElementById(`panel-${id}`)])
   );
 
@@ -53,14 +119,14 @@ document.addEventListener('DOMContentLoaded', () => {
   const uploadStatus    = document.getElementById('upload-status');
 
   // ── Initial state ───────────────────────────────────────
-  extractBtn.disabled   = true;   // enabled only after a valid file is chosen
+  extractBtn.disabled      = true;   // enabled only after a valid file is chosen
   uploadStatus.textContent = '';
 
   // ── Wire tabs ───────────────────────────────────────────
   TAB_IDS.forEach((id) => {
-    tabBtns[id].addEventListener('click', () => activateTab(id, tabBtns, tabPanels));
+    _tabBtns[id].addEventListener('click', () => switchTab(id));
   });
-  activateTab(DEFAULT_TAB, tabBtns, tabPanels);
+  switchTab(DEFAULT_TAB);
 
   // ── Wire dropzone ───────────────────────────────────────
   initDropzone({ dropzone, fileInput, dropzoneTitle, dropzoneSub,
@@ -79,15 +145,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
 /**
  * Activates one tab and deactivates all others.
+ * Uses the module-level _tabBtns / _tabPanels maps.
  *
- * @param {string} tabId     - 'upload' | 'profiles' | 'autofill'
- * @param {Object} tabBtns   - Map of tabId → <button>
- * @param {Object} tabPanels - Map of tabId → <section>
+ * @param {string} tabId - 'upload' | 'profiles' | 'autofill'
  */
-function activateTab(tabId, tabBtns, tabPanels) {
+function switchTab(tabId) {
   TAB_IDS.forEach((id) => {
-    const btn      = tabBtns[id];
-    const panel    = tabPanels[id];
+    const btn      = _tabBtns[id];
+    const panel    = _tabPanels[id];
     const isActive = id === tabId;
 
     if (!btn || !panel) {
@@ -108,6 +173,16 @@ function activateTab(tabId, tabBtns, tabPanels) {
 
   const label = tabId.charAt(0).toUpperCase() + tabId.slice(1);
   console.log(`[Fillosophy] Tab switched to: ${label}`);
+
+  // Side-effect: refresh live data whenever the Autofill tab becomes active
+  if (tabId === 'autofill') {
+    loadAutofillTab();
+  }
+}
+
+// Keep the old name around in case other code calls activateTab directly
+function activateTab(tabId, tabBtns, tabPanels) {
+  switchTab(tabId);
 }
 
 // ════════════════════════════════════════════════════════════
@@ -214,8 +289,8 @@ function applyFileSelection(file, els) {
 
 /**
  * POSTs the selected PDF to the /extract endpoint.
- * Shows loading state on the button; surfaces success or error feedback.
- * Does NOT reload or navigate the popup.
+ * On success: stores the profile, updates the Profiles tab, and switches to it.
+ * On failure: surfaces the error in the status bar.
  *
  * @param {Object} els - Named DOM element references.
  */
@@ -261,14 +336,32 @@ async function handleExtract(els) {
     const data = await response.json();
     console.log('[Fillosophy Upload] Extract success:', data);
 
-    // On success: show char count, leave button disabled (re-select to run again)
+    // ── Store and display the profile ───────────────────────────────────────
+    currentProfile = data.profile;
+    displayProfile(data.profile);
+
+    // ── Persist to chrome.storage ───────────────────────────────────────────
+    try {
+      await saveProfile(profileName, data.profile);
+      await setActiveProfile(profileName);
+      console.log(`[Fillosophy] Profile saved to chrome.storage`);
+    } catch (storageErr) {
+      // Non-fatal — the backend already saved to SQLite; just warn
+      console.warn('[Fillosophy] chrome.storage save failed:', storageErr.message);
+    }
+
+    // ── Update status & switch tab ──────────────────────────────────────────
     setStatus(
       uploadStatus,
-      `✓ Profile saved! ${data.char_count} characters extracted.`,
+      `✓ Profile saved! ${data.profile.full_name} — ${data.char_count} chars extracted.`,
       'success'
     );
+
     // Keep button disabled — user must select a new file to run again
     extractBtn.disabled = true;
+
+    // Switch to Profiles tab after a short delay so the user sees the message
+    setTimeout(() => switchTab('profiles'), 1200);
 
   } catch (err) {
     const isNetworkError = err instanceof TypeError;
@@ -285,6 +378,272 @@ async function handleExtract(els) {
   } finally {
     // Restore button label/icon regardless of outcome
     setLoadingState(extractBtn, extractBtnLabel, extractBtnIcon, false);
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// PROFILE DISPLAY
+// ════════════════════════════════════════════════════════════
+
+/**
+ * Populates the readonly preview fields in the Profiles tab with extracted
+ * profile data and syncs the active-profile radio button.
+ *
+ * @param {Object} profile - Structured profile dict returned by /extract.
+ */
+function displayProfile(profile) {
+  // ── Populate preview inputs ─────────────────────────────────────────────
+  const set = (id, value) => {
+    const el = document.getElementById(id);
+    if (el) el.value = value;
+  };
+
+  set('profile-field-name',   profile.full_name ?? '—');
+  set('profile-field-email',  profile.email     ?? '—');
+  set('profile-field-cgpa',   profile.cgpa      ?? '—');
+  set('profile-field-degree', profile.degree    ?? '—');
+  set('profile-field-skills',
+    Array.isArray(profile.skills)
+      ? profile.skills.join(', ')
+      : (profile.skills ?? '—')
+  );
+
+  console.log('[Fillosophy] Profile displayed in Profiles tab');
+}
+
+// ════════════════════════════════════════════════════════════
+// AUTOFILL TAB — LIVE DATA LOADER
+// ════════════════════════════════════════════════════════════
+
+/**
+ * Called every time the Autofill tab becomes active.
+ * Fetches live page info from the content script and the active profile
+ * from chrome.storage via the service worker, then updates the UI.
+ */
+async function loadAutofillTab() {
+  // Grab all the elements we'll update
+  const urlEl            = document.getElementById('current-page-url');
+  const fieldsFoundEl    = document.getElementById('stat-fields-found');
+  const highConfidenceEl = document.getElementById('stat-high-confidence');
+  const needsReviewEl    = document.getElementById('stat-needs-review');
+  const activeProfileEl  = document.getElementById('active-profile-name');
+  const autofillBtn      = document.getElementById('autofill-btn');
+  const tabStatus        = document.getElementById('autofill-tab-status');
+
+  // ── Step 1: loading state ──────────────────────────────────────────────────
+  if (urlEl)         urlEl.textContent         = 'Scanning page…';
+  if (fieldsFoundEl) fieldsFoundEl.textContent = '—';
+  if (highConfidenceEl) highConfidenceEl.textContent = '—';
+  if (needsReviewEl)    needsReviewEl.textContent    = '—';
+  if (tabStatus)     { tabStatus.textContent = ''; tabStatus.className = 'upload-status'; }
+  if (autofillBtn)   autofillBtn.disabled      = true; // Disable until everything is ready
+
+  // ── Step 1a: PING — verify content script is reachable before proceeding ───
+  try {
+    const ping = await sendMessage('PING_CONTENT');
+    if (ping?.status !== 'content_script_ready') {
+      throw new Error(ping?.message ?? 'Content script did not respond');
+    }
+  } catch (pingErr) {
+    console.warn('[Fillosophy] PING_CONTENT failed:', pingErr.message);
+    if (urlEl)     urlEl.textContent     = 'Unavailable';
+    if (tabStatus) {
+      tabStatus.textContent = '⚠ Fillosophy cannot access this page. Navigate to a website with a form and try again.';
+      tabStatus.className   = 'upload-status error';
+    }
+    if (autofillBtn) autofillBtn.disabled = true;
+    return; // abort — no point calling GET_PAGE_INFO or DETECT_FIELDS
+  }
+
+  // ── Step 2: GET_PAGE_INFO via service worker ───────────────────────────────
+  try {
+    const pageInfo = await sendMessage('GET_PAGE_INFO');
+    if (pageInfo?.status === 'error') {
+      throw new Error(pageInfo.message ?? 'Content script not reachable');
+    }
+    if (urlEl) urlEl.textContent = pageInfo.url ?? 'Unknown URL';
+    console.log(`[Fillosophy] Page info loaded — ${pageInfo.fieldCount} field(s) on ${pageInfo.url}`);
+  } catch (pageErr) {
+    console.warn('[Fillosophy] GET_PAGE_INFO failed:', pageErr.message);
+    if (urlEl)       urlEl.textContent       = 'Unavailable';
+    if (tabStatus) {
+      tabStatus.textContent = '⚠ Fillosophy cannot read this page. Try refreshing or navigate to a page with a form.';
+      tabStatus.className   = 'upload-status error';
+    }
+    if (autofillBtn) autofillBtn.disabled = true;
+    return;
+  }
+
+  // ── Step 3: GET_ACTIVE_PROFILE via service worker ──────────────────────────
+  try {
+    const profileRes = await sendMessage('GET_ACTIVE_PROFILE');
+    if (profileRes?.status === 'ok') {
+      const name = profileRes.profileName ?? 'Unknown';
+      if (activeProfileEl) activeProfileEl.textContent = name;
+      currentProfile = profileRes.profile;
+      console.log(`[Fillosophy] Active profile loaded: ${name}`);
+    } else {
+      if (activeProfileEl) activeProfileEl.textContent = 'None';
+      if (tabStatus) {
+        tabStatus.textContent = '⚠ No profile loaded. Upload a resume first.';
+        tabStatus.className   = 'upload-status error';
+      }
+      if (autofillBtn) autofillBtn.disabled = true;
+      console.warn('[Fillosophy] No active profile found in storage.');
+      return;
+    }
+  } catch (profileErr) {
+    console.warn('[Fillosophy] GET_ACTIVE_PROFILE failed:', profileErr.message);
+    if (activeProfileEl) activeProfileEl.textContent = 'Unknown';
+    if (tabStatus) {
+      tabStatus.textContent = '⚠ Could not load profile data.';
+      tabStatus.className   = 'upload-status error';
+    }
+    if (autofillBtn) autofillBtn.disabled = true;
+    return;
+  }
+
+  // ── Step 4: Collect full field labels ──────────────────────────────────────
+  try {
+    fieldLabels = await collectFieldLabels();
+    if (fieldsFoundEl) fieldsFoundEl.textContent = fieldLabels.length;
+    console.log('[Fillosophy] Field labels:', fieldLabels);
+
+    if (fieldLabels.length === 0) {
+      if (fieldsFoundEl) fieldsFoundEl.textContent = '0';
+      if (tabStatus) {
+        tabStatus.textContent = '⚠ No form fields detected on this page.';
+        tabStatus.className   = 'upload-status error';
+      }
+      if (autofillBtn) autofillBtn.disabled = true;
+      console.log('[Fillosophy] No fields detected — autofill disabled');
+      return;
+    }
+  } catch (labelErr) {
+    console.warn('[Fillosophy] collectFieldLabels failed:', labelErr.message);
+    if (tabStatus) {
+      tabStatus.textContent = '⚠ Failed to detect form fields on this page.';
+      tabStatus.className   = 'upload-status error';
+    }
+    if (autofillBtn) autofillBtn.disabled = true;
+    return;
+  }
+
+  // ── Step 5: previewMatch ───────────────────────────────────────────────────
+  await previewMatch();
+}
+
+/**
+ * Calls the /match endpoint to get a preview of the fill confidence.
+ */
+async function previewMatch() {
+  if (fieldLabels.length === 0 || !currentProfile) return;
+
+  const highConfidenceEl = document.getElementById('stat-high-confidence');
+  const needsReviewEl    = document.getElementById('stat-needs-review');
+  const tabStatus        = document.getElementById('autofill-tab-status');
+  const autofillBtn      = document.getElementById('autofill-btn');
+  const fieldsFoundEl    = document.getElementById('stat-fields-found');
+
+  if (highConfidenceEl) highConfidenceEl.textContent = '...';
+  if (needsReviewEl)    needsReviewEl.textContent    = '...';
+
+  try {
+    const response = await fetch('http://localhost:8000/match', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ profile: currentProfile, fields: fieldLabels })
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    fieldMapping = data.mapping || {};
+
+    if (fieldsFoundEl)    fieldsFoundEl.textContent    = data.total_fields;
+    if (highConfidenceEl) highConfidenceEl.textContent = data.high_confidence;
+    if (needsReviewEl)    needsReviewEl.textContent    = data.needs_review;
+
+    if (data.needs_review > 0) {
+      if (tabStatus) {
+        tabStatus.textContent = `⚠ ${data.needs_review} field(s) will be flagged for review.`;
+        tabStatus.className   = 'upload-status amber';
+      }
+    } else {
+      if (tabStatus) {
+        tabStatus.textContent = '✓ All fields matched with high confidence.';
+        tabStatus.className   = 'upload-status success';
+      }
+    }
+
+    if (autofillBtn) autofillBtn.disabled = false;
+    console.log('[Fillosophy] Match preview complete. Mapping ready.');
+
+  } catch (err) {
+    console.error('[Fillosophy] Match preview failed:', err);
+    if (tabStatus) {
+      tabStatus.textContent = '✗ Matching failed. Check if the backend is running.';
+      tabStatus.className   = 'upload-status error';
+    }
+    if (autofillBtn) autofillBtn.disabled = true;
+  }
+}
+
+// ════════════════════════════════════════════════════════════
+// FIELD LABEL COLLECTION
+// ════════════════════════════════════════════════════════════
+
+/**
+ * Sends DETECT_FIELDS to the service worker, stores the full descriptor
+ * objects in detectedFields, and returns a flat array of best-available
+ * label strings for the AI /match endpoint.
+ *
+ * Priority order per descriptor:
+ *   label → placeholder → ariaLabel → name → id → "field_{index}"
+ *
+ * @returns {Promise<string[]>} One label string per detected field.
+ */
+async function collectFieldLabels() {
+  const response = await sendMessage('DETECT_FIELDS');
+
+  if (response?.status !== 'ok') {
+    throw new Error(`DETECT_FIELDS returned status: ${response?.status ?? 'undefined'}`);
+  }
+
+  // Store full descriptors for the Week 5 autofill handler
+  detectedFields = response.fields ?? [];
+
+  // Build the label list using the specified priority order
+  const labels = detectedFields.map((d) =>
+    d.label       ??
+    d.placeholder ??
+    d.ariaLabel   ??
+    d.name        ??
+    d.id          ??
+    `field_${d.index}`
+  );
+
+  console.log(`[Fillosophy] Collected ${labels.length} field labels for matching`);
+  return labels;
+}
+
+/**
+ * Finds the radio button in the Profiles tab whose value matches profileName
+ * and sets it as checked.
+ *
+ * @param {string} profileName - e.g. "personal" | "academic" | "job"
+ */
+function setActiveProfileRadio(profileName) {
+  const radio = document.querySelector(
+    `input[type="radio"][name="active-profile"][value="${profileName}"]`
+  );
+  if (radio) {
+    radio.checked = true;
+    console.log(`[Fillosophy] Active profile radio set to: ${profileName}`);
+  } else {
+    console.warn(`[Fillosophy] No radio found for profile: "${profileName}"`);
   }
 }
 
@@ -315,8 +674,8 @@ function setStatus(el, message, type) {
  * @param {boolean}           isLoading
  */
 function setLoadingState(btn, labelEl, iconEl, isLoading) {
-  if (labelEl) labelEl.textContent   = isLoading ? 'Extracting…' : 'Extract & Save Profile';
-  if (iconEl)  iconEl.style.opacity  = isLoading ? '0' : '1';
+  if (labelEl) labelEl.textContent  = isLoading ? 'Extracting…' : 'Extract & Save Profile';
+  if (iconEl)  iconEl.style.opacity = isLoading ? '0' : '1';
   // Only force-disable on entry; re-enable decisions are made by the caller
   if (isLoading) btn.disabled = true;
 }
