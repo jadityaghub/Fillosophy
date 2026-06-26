@@ -366,7 +366,7 @@ async function handleExtract(els) {
   } catch (err) {
     const isNetworkError = err instanceof TypeError;
     const message = isNetworkError
-      ? '✗ Could not reach Fillosophy backend. Is it running on port 8000?'
+      ? '⚠️ The backend server is currently offline. Please start it to extract profiles.'
       : `✗ Error: ${err.message}`;
 
     console.error('[Fillosophy Upload] Extract failed:', err.message);
@@ -584,7 +584,7 @@ async function previewMatch() {
   } catch (err) {
     console.error('[Fillosophy] Match preview failed:', err);
     if (tabStatus) {
-      tabStatus.textContent = '✗ Matching failed. Check if the backend is running.';
+      tabStatus.textContent = '⚠️ The backend server is offline. Please start it to map fields.';
       tabStatus.className   = 'upload-status error';
     }
     if (autofillBtn) autofillBtn.disabled = true;
