@@ -176,6 +176,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         .catch((err) => sendResponse({ success: false, error: err.message }));
       return true;
 
+    // APPLY_AUTOFILL — forward AI mapping + field descriptors to content script
+    case 'APPLY_AUTOFILL':
+      getActiveTab()
+        .then(async (tab) => {
+          const ready = await ensureContentScript(tab.id);
+          if (!ready) {
+            sendResponse({ status: 'error', message: 'Cannot inject into this page type' });
+            return;
+          }
+          console.log(`[Fillosophy SW] Forwarding autofill: ${(message.fields ?? []).length} fields`);
+          const response = await sendToContentScript(tab.id, {
+            type:    'APPLY_AUTOFILL',
+            mapping: message.mapping,
+            fields:  message.fields
+          });
+          sendResponse({ status: 'ok', summary: response?.summary ?? {} });
+        })
+        .catch((err) => {
+          console.error('[Fillosophy SW] Autofill failed:', err);
+          sendResponse({ status: 'error', message: err.message });
+        });
+      return true;
+
     default:
       console.warn(`[Fillosophy SW] Unknown message type: ${message.type}`);
       sendResponse({ status: 'unhandled' });

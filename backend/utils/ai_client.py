@@ -275,6 +275,7 @@ return a JSON object with exactly these keys:
 
 {{
   "full_name": string or null,
+  "preferred_name": string or null (e.g., from 'Commonly known as', 'Nickname', etc.),
   "email": string or null,
   "phone": string or null,
   "address": string or null,
@@ -282,6 +283,7 @@ return a JSON object with exactly these keys:
   "institution": string or null,
   "cgpa": number or null,
   "graduation_year": integer or null,
+  "links": [ list of URLs or portfolio links ] or [],
   "skills": [ list of strings ] or [],
   "experience": [
     {{
@@ -298,7 +300,8 @@ return a JSON object with exactly these keys:
       "technologies": string
     }}
   ] or [],
-  "certifications": [ list of strings ] or []
+  "certifications": [ list of strings ] or [],
+  "additional_info": string or null (any other relevant information like availability, motivation, or preferences)
 }}
 
 Resume text:
@@ -344,10 +347,13 @@ Rules:
 - Semantic equivalence examples:
     "Academic Score", "GPA", "CGPA", "Percentage" → profile.cgpa
     "Full Name", "Applicant Name", "Your Name"     → profile.full_name
+    "Preferred Name", "Nickname", "Known As"       → profile.preferred_name
     "Contact", "Mobile", "Phone Number"            → profile.phone
     "Branch", "Department", "Program", "Course"    → profile.degree
     "College", "University", "Institution"         → profile.institution
     "Passing Year", "Year of Graduation"           → profile.graduation_year
+- For checkboxes requiring confirmation or consent (e.g. "I confirm...", "I agree..."), return true or "yes" with high confidence.
+- If a field is clearly asking for a date (e.g. "Available From", "Start Date"), return the value strictly in YYYY-MM-DD format.
 """
 
 

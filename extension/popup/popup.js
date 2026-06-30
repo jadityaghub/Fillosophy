@@ -1,6 +1,6 @@
 // Fillosophy — Popup controller | Tab switching, PDF upload, backend fetch
 
-import { saveProfile, setActiveProfile } from '../utils/storage.js';
+import { saveProfile, setActiveProfile, getProfile } from '../utils/storage.js';
 
 // ════════════════════════════════════════════════════════════
 // CONSTANTS
@@ -93,6 +93,13 @@ let fieldLabels = [];
  */
 let fieldMapping = {};
 
+/**
+ * Unix timestamp (ms) of the last successful previewMatch() call.
+ * Used to detect stale mappings when the user re-opens the Autofill tab.
+ * @type {number|null}
+ */
+let lastMatchTimestamp = null;
+
 // ════════════════════════════════════════════════════════════
 // INITIALISATION
 // ════════════════════════════════════════════════════════════
@@ -132,11 +139,66 @@ document.addEventListener('DOMContentLoaded', () => {
   initDropzone({ dropzone, fileInput, dropzoneTitle, dropzoneSub,
                  extractBtn, uploadStatus });
 
-  // ── Wire extract button ─────────────────────────────────
+  // ── Wire extract button ────────────────────────────────────────
   extractBtn.addEventListener('click', () => {
     handleExtract({ profileSelect, extractBtn, extractBtnLabel,
                     extractBtnIcon, uploadStatus });
   });
+
+  // ── Wire Switch profile link ──────────────────────────────────
+  const switchProfileBtn = document.getElementById('switch-profile-btn');
+  if (switchProfileBtn) {
+    switchProfileBtn.addEventListener('click', () => {
+      // Step 1: Navigate to the Profiles tab
+      switchTab('profiles');
+
+      // Step 2: Listen for a radio change — use a named handler so we can
+      // remove it after first use to avoid stacking multiple listeners
+      const onRadioChange = async (e) => {
+        if (e.target.name !== 'active-profile') return;
+
+        const selectedName = e.target.value;
+        console.log(`[Fillosophy] Profile radio changed to: ${selectedName}`);
+
+        // Fetch saved profile data from storage
+        const profileData = await getProfile(selectedName);
+        const profilesTabStatus = document.getElementById('upload-status');
+
+        if (!profileData) {
+          // No uploaded data for this slot — warn the user
+          const warnEl = document.querySelector('#panel-profiles .upload-status') ||
+                         document.createElement('p');
+          warnEl.textContent = `⚠ No data found for “${selectedName}”. Upload a resume under this profile first.`;
+          warnEl.className   = 'upload-status error';
+          // Ensure it's inside the profiles panel if it was just created
+          const profilesPanel = document.getElementById('panel-profiles');
+          if (profilesPanel && !profilesPanel.contains(warnEl)) {
+            profilesPanel.appendChild(warnEl);
+          }
+          console.warn(`[Fillosophy] No profile data found for: ${selectedName}`);
+          return;
+        }
+
+        // Step 2b: Apply the newly selected profile
+        currentProfile = profileData;
+        await setActiveProfile(selectedName);
+        displayProfile(profileData);
+        console.log(`[Fillosophy] Switched active profile to: ${selectedName}`);
+
+        // Step 2c: Invalidate cached field mapping — forces fresh match on
+        // next Autofill tab open (lastMatchTimestamp=null bypasses the 60-s check)
+        fieldMapping        = {};
+        lastMatchTimestamp  = null;
+        console.log('[Fillosophy] Field mapping invalidated due to profile switch');
+      };
+
+      // Attach to the profiles panel radio group; remove after any selection
+      const profilesPanel = document.getElementById('panel-profiles');
+      if (profilesPanel) {
+        profilesPanel.addEventListener('change', onRadioChange);
+      }
+    });
+  }
 });
 
 // ════════════════════════════════════════════════════════════
@@ -529,12 +591,20 @@ async function loadAutofillTab() {
     return;
   }
 
-  // ── Step 5: previewMatch ───────────────────────────────────────────────────
-  await previewMatch();
+  // ── Step 5: previewMatch — skip if mapping is fresh (< 60 s old) ──────────
+  const isStale = !lastMatchTimestamp || (Date.now() - lastMatchTimestamp > 60_000);
+  if (isStale) {
+    await previewMatch();
+  } else {
+    console.log('[Fillosophy] Using cached mapping — last match was < 60 s ago.');
+    // Still re-enable the button with the cached mapping
+    if (autofillBtn) autofillBtn.disabled = false;
+  }
 }
 
 /**
  * Calls the /match endpoint to get a preview of the fill confidence.
+ * Records lastMatchTimestamp on success and wires the Autofill button.
  */
 async function previewMatch() {
   if (fieldLabels.length === 0 || !currentProfile) return;
@@ -562,6 +632,9 @@ async function previewMatch() {
     const data = await response.json();
     fieldMapping = data.mapping || {};
 
+    // Record when we last got a fresh mapping
+    lastMatchTimestamp = Date.now();
+
     if (fieldsFoundEl)    fieldsFoundEl.textContent    = data.total_fields;
     if (highConfidenceEl) highConfidenceEl.textContent = data.high_confidence;
     if (needsReviewEl)    needsReviewEl.textContent    = data.needs_review;
@@ -578,7 +651,83 @@ async function previewMatch() {
       }
     }
 
-    if (autofillBtn) autofillBtn.disabled = false;
+    if (autofillBtn) {
+      autofillBtn.disabled = false;
+
+      // ── Autofill button click handler ─────────────────────────────────────
+      // Clone to remove any previous listener before attaching a fresh one
+      const freshBtn = autofillBtn.cloneNode(true);
+      autofillBtn.parentNode.replaceChild(freshBtn, autofillBtn);
+
+      freshBtn.addEventListener('click', async () => {
+        const showError = (msg) => {
+          const el = document.getElementById('autofill-tab-status');
+          if (el) { el.textContent = msg; el.className = 'upload-status error'; }
+        };
+
+        // Guard 1 — mapping must exist
+        if (!fieldMapping || Object.keys(fieldMapping).length === 0) {
+          showError('⚠ No field matches available. Reopen this tab to rescan.');
+          return;
+        }
+        // Guard 2 — fields must be detected
+        if (!detectedFields || detectedFields.length === 0) {
+          showError('⚠ No fields detected on this page.');
+          return;
+        }
+
+        // Loading state
+        freshBtn.disabled    = true;
+        freshBtn.textContent = 'Filling form…';
+        // Always re-query — the clone swap may have detached the old reference
+        const getStatus = () => document.getElementById('autofill-tab-status');
+        const st = getStatus();
+        if (st) { st.textContent = ''; st.className = 'upload-status'; }
+
+        try {
+          const res = await sendMessage('APPLY_AUTOFILL', {
+            mapping: fieldMapping,
+            fields:  detectedFields
+          });
+
+          const summary = res?.summary ?? {};
+          const filled  = summary.filled  ?? 0;
+          const flagged = summary.flagged ?? 0;
+
+          // Update stats row with post-fill numbers
+          const hcEl = document.getElementById('stat-high-confidence');
+          const nrEl = document.getElementById('stat-needs-review');
+          if (hcEl) hcEl.textContent = filled;
+          if (nrEl) nrEl.textContent = flagged;
+
+          // Status message
+          const st2 = getStatus();
+          if (st2) {
+            if (flagged > 0) {
+              st2.textContent = `✓ Filled ${filled} field(s). ${flagged} flagged for your review on the page.`;
+              st2.className   = 'upload-status amber';
+            } else {
+              st2.textContent = `✓ All ${filled} field(s) filled successfully!`;
+              st2.className   = 'upload-status success';
+            }
+          }
+
+          console.log('[Fillosophy] Autofill applied:', summary);
+
+        } catch (err) {
+          console.error('[Fillosophy] Autofill failed:', err);
+          const st3 = getStatus();
+          if (st3) {
+            st3.textContent = `✗ Autofill failed. ${err.message}`;
+            st3.className   = 'upload-status error';
+          }
+        } finally {
+          freshBtn.disabled    = false;
+          freshBtn.textContent = '⚡ Autofill This Form';
+        }
+      });
+    }
+
     console.log('[Fillosophy] Match preview complete. Mapping ready.');
 
   } catch (err) {
