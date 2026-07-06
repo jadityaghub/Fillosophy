@@ -283,12 +283,53 @@
       waitForStableForm(3000)
         .then(() => {
           const fields = detectFormFields();
+
+          // Deduplicate labels: if two fields resolve to the same label string,
+          // append the field index to make it unique. Must stay in sync with
+          // the same logic in applyAutofill().
+          const seenLabels = new Set();
+          for (const field of fields) {
+            const baseLabel =
+              field.label       ??
+              field.placeholder ??
+              field.ariaLabel   ??
+              field.name        ??
+              field.id          ??
+              `field_${field.index}`;
+
+            if (seenLabels.has(baseLabel)) {
+              // Override the descriptor's label so the label sent to /match
+              // matches the key used in applyAutofill()
+              field.label = `${baseLabel} (${field.index})`;
+            } else {
+              seenLabels.add(baseLabel);
+            }
+          }
+
           sendResponse({ status: 'ok', fields: fields, count: fields.length });
         })
         .catch((err) => {
           console.error('[Fillosophy Content] waitForStableForm error:', err);
-          // Fallback: detect immediately
           const fields = detectFormFields();
+
+          // Deduplicate labels (same logic as the success path above)
+          const seenLabels = new Set();
+          for (const field of fields) {
+            const baseLabel =
+              field.label       ??
+              field.placeholder ??
+              field.ariaLabel   ??
+              field.name        ??
+              field.id          ??
+              `field_${field.index}`;
+
+            if (seenLabels.has(baseLabel)) {
+              field.label = `${baseLabel} (${field.index})`;
+            } else {
+              seenLabels.add(baseLabel);
+            }
+          }
+
           sendResponse({ status: 'ok', fields: fields, count: fields.length });
         });
       return true; // async — keep port open
@@ -392,13 +433,20 @@
 
       // MUST use the exact same priority as collectFieldLabels() in popup.js
       // so that mapping keys from /match line up with the right elements.
-      const label =
+      let label =
         descriptor.label       ??
         descriptor.placeholder ??
         descriptor.ariaLabel   ??
         descriptor.name        ??
         descriptor.id          ??
         `field_${descriptor.index}`;
+
+      // Deduplicate: if this label already exists in the map, append
+      // the field index to make it unique. This must match the same
+      // deduplication logic in the DETECT_FIELDS handler.
+      if (label in labelToElementMap) {
+        label = `${label} (${descriptor.index})`;
+      }
 
       labelToElementMap[label] = el;
     }

@@ -94,7 +94,20 @@ async def match_fields(payload: MatchRequest) -> dict:
           f"against profile {profile_tag}")
 
     try:
-        mapping = match_fields_to_profile(payload.profile, payload.fields)
+        if len(payload.fields) > 40:
+            # Large form — batch to avoid hitting Claude's context/output limits
+            batch_size = 30
+            n = len(payload.fields)
+            print(f"[Fillosophy /match] Large form detected, batching {n} fields")
+            mapping = {}
+            for i in range(0, n, batch_size):
+                batch = payload.fields[i:i + batch_size]
+                print(f"[Fillosophy /match] Batch {i // batch_size + 1}: "
+                      f"fields {i + 1}–{min(i + batch_size, n)}")
+                batch_result = match_fields_to_profile(payload.profile, batch)
+                mapping.update(batch_result)
+        else:
+            mapping = match_fields_to_profile(payload.profile, payload.fields)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(
             status_code=502,

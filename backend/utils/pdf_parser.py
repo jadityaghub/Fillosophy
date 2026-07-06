@@ -27,28 +27,41 @@ def extract_text_from_pdf(file_bytes: bytes) -> str:
         str: Cleaned, readable text extracted from the PDF.
 
     Raises:
+        ValueError: If the uploaded file is empty (zero bytes).
+        ValueError: If the PDF file appears to be corrupted or unreadable.
         ValueError: If the PDF contains no extractable text (e.g. scanned image).
         pdfplumber.exceptions.PDFSyntaxError: If the bytes are not a valid PDF.
     """
-    with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-        page_count = len(pdf.pages)
-        print(f"[Fillosophy PDF] Opened PDF — {page_count} page(s) detected.")
+    # Guard: reject empty uploads before attempting to parse
+    if len(file_bytes) == 0:
+        raise ValueError("Uploaded file is empty")
 
-        page_texts: list[str] = []
+    try:
+        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
+            page_count = len(pdf.pages)
+            print(f"[Fillosophy PDF] Opened PDF — {page_count} page(s) detected.")
 
-        for page_num, page in enumerate(pdf.pages, start=1):
-            raw = page.extract_text()
+            page_texts: list[str] = []
 
-            # Skip pages that return None or only whitespace
-            if not raw or not raw.strip():
-                print(f"[Fillosophy PDF] Page {page_num}/{page_count} — no text, skipping.")
-                continue
+            for page_num, page in enumerate(pdf.pages, start=1):
+                raw = page.extract_text()
 
-            page_texts.append(raw.strip())
-            print(
-                f"[Fillosophy PDF] Page {page_num}/{page_count} — "
-                f"{len(raw.strip())} chars extracted."
-            )
+                # Skip pages that return None or only whitespace
+                if not raw or not raw.strip():
+                    print(f"[Fillosophy PDF] Page {page_num}/{page_count} — no text, skipping.")
+                    continue
+
+                page_texts.append(raw.strip())
+                print(
+                    f"[Fillosophy PDF] Page {page_num}/{page_count} — "
+                    f"{len(raw.strip())} chars extracted."
+                )
+    except ValueError:
+        raise  # Re-raise our own ValueError from the empty-bytes guard above
+    except Exception as exc:
+        raise ValueError(
+            "The PDF file appears to be corrupted or unreadable"
+        ) from exc
 
     # Guard: nothing useful was found across all pages
     if not page_texts:

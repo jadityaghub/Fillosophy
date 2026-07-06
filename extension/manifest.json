@@ -5,6 +5,7 @@
   "description": "AI-powered resume-based smart form autofill tool.",
   "permissions": [
     "activeTab",
+    "downloads",
     "scripting",
     "storage"
   ],

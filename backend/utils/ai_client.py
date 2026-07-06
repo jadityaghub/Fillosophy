@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import time
 import httpx
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
@@ -82,15 +83,46 @@ def _get_completion(system_prompt: str, user_message: str, context: str) -> str:
                 if not api_key:
                     raise ValueError("ANTHROPIC_API_KEY not set")
                 logger.info("%s Calling Anthropic API for %s", LOG_PREFIX, context)
-                resp = _get_client().messages.create(
-                    model=_MODEL,
-                    max_tokens=_MAX_TOKENS,
-                    system=system_prompt,
-                    messages=[{"role": "user", "content": user_message}],
-                )
-                if _active_provider != provider:
-                    _active_provider = provider
-                return resp.content[0].text
+                # Retry up to 2 times with exponential backoff for rate-limit / timeout
+                max_retries = 2
+                for attempt in range(max_retries + 1):
+                    try:
+                        resp = _get_client().messages.create(
+                            model=_MODEL,
+                            max_tokens=_MAX_TOKENS,
+                            system=system_prompt,
+                            messages=[{"role": "user", "content": user_message}],
+                        )
+                        if _active_provider != provider:
+                            _active_provider = provider
+                        return resp.content[0].text
+                    except Exception as retry_exc:
+                        err_name = type(retry_exc).__name__
+                        is_retryable = any(kw in err_name.lower() for kw in (
+                            'ratelimit', 'rate_limit', 'timeout', 'overloaded',
+                        )) or any(kw in str(retry_exc).lower() for kw in (
+                            'rate limit', 'timeout', '529', 'overloaded',
+                        ))
+                        if is_retryable and attempt < max_retries:
+                            wait = 2 ** attempt  # 1s, then 2s
+                            logger.warning(
+                                "%s Retryable error on attempt %d/%d (%s), "
+                                "retrying in %ds…",
+                                LOG_PREFIX, attempt + 1, max_retries + 1,
+                                err_name, wait,
+                            )
+                            print(
+                                f"{LOG_PREFIX} ⏳ {err_name} — retrying in {wait}s "
+                                f"(attempt {attempt + 1}/{max_retries + 1})"
+                            )
+                            time.sleep(wait)
+                        else:
+                            if attempt == max_retries and is_retryable:
+                                raise RuntimeError(
+                                    "Claude API is currently unavailable. "
+                                    "Please try again in a moment."
+                                ) from retry_exc
+                            raise  # Non-retryable error — let cascade handle it
 
             elif provider == "groq":
                 api_key = os.getenv("GROQ_API_KEY")
@@ -116,7 +148,7 @@ def _get_completion(system_prompt: str, user_message: str, context: str) -> str:
                 content = _call_openai_compatible(
                     "https://openrouter.ai/api/v1/chat/completions",
                     api_key,
-                    "meta-llama/llama-3.1-8b-instruct",
+                    "poolside/laguna-xs-2.1:free",
                     system_prompt,
                     user_message
                 )
@@ -133,8 +165,14 @@ def _get_completion(system_prompt: str, user_message: str, context: str) -> str:
                 f"{LOG_PREFIX}    Reason   : {type(exc).__name__}: {exc}\n"
             )
             logger.warning("%s Fallback triggered (%s) from %s to %s: %s", LOG_PREFIX, context, provider, next_provider, exc)
-            _active_provider = next_provider
+            if next_provider != "mock":
+                _active_provider = next_provider
+            else:
+                # If we hit mock, don't permanently lock the server to mock mode.
+                # Reset to anthropic so the next request tries the real APIs again.
+                _active_provider = "anthropic"
 
+    # If we get here, all providers failed
     raise RuntimeError(f"All AI providers failed. Last error: {last_exc}")
 
 # ─── Client setup ─────────────────────────────────────────────────────────────

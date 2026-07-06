@@ -167,6 +167,13 @@
             </div>
           </div>
 
+          <!-- Check upload status (helps if popup closed mid-extraction) -->
+          <div class="section-block" style="padding-top: 0;">
+            <a href="#" id="check-upload-status" class="section-label" style="font-size: 10px; cursor: pointer; text-decoration: underline; color: #6B7280;">
+              ↻ Check last upload status
+            </a>
+          </div>
+
           <!-- Field preview -->
           <div class="section-block">
             <span class="section-label">PROFILE PREVIEW</span>
@@ -208,7 +215,11 @@
               </svg>
               Import
             </button>
+            <input type="file" id="import-file-input" accept=".json" style="display:none">
           </div>
+
+          <!-- Status message for profiles tab actions (export / import) -->
+          <p class="upload-status" id="profiles-tab-status"></p>
         </section>
 
         <!-- ── Autofill Tab ── -->

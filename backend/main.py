@@ -16,13 +16,14 @@ Interactive docs:
 import os
 
 from dotenv import load_dotenv
-load_dotenv()  # Must run before any import that reads os.getenv()
+load_dotenv(override=True)  # Must run before any import that reads os.getenv()
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from routes.extract import router as extract_router
 from routes.match import router as match_router
+from routes.profiles import router as profiles_router
 from database.profiles import init_db
 
 # ─── App instance ─────────────────────────────────────────────
@@ -71,8 +72,10 @@ def startup():
             print("[Fillosophy] Set SUPABASE_URL and SUPABASE_KEY in .env")
 
 # ─── Routers ──────────────────────────────────────────────────
-app.include_router(extract_router, prefix="/extract", tags=["Extract"])
-app.include_router(match_router,   prefix="/match",   tags=["Match"])
+app.include_router(extract_router,  prefix="/extract",  tags=["Extract"])
+app.include_router(match_router,    prefix="/match",    tags=["Match"])
+app.include_router(profiles_router, prefix="/profiles", tags=["Profiles"])
+print("[Fillosophy] Profile management routes registered at /profiles")
 
 
 # ─── Root / health-check ──────────────────────────────────────

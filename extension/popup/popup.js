@@ -1,6 +1,7 @@
 // Fillosophy — Popup controller | Tab switching, PDF upload, backend fetch
 
-import { saveProfile, setActiveProfile, getProfile } from '../utils/storage.js';
+import { saveProfile, setActiveProfile, getProfile, getActiveProfile } from '../utils/storage.js';
+import { applyTemplateMatching } from '../utils/templates.js';
 
 // ════════════════════════════════════════════════════════════
 // CONSTANTS
@@ -100,6 +101,14 @@ let fieldMapping = {};
  */
 let lastMatchTimestamp = null;
 
+/**
+ * URL of the page in the active tab.  Set by loadAutofillTab() after a
+ * successful GET_PAGE_INFO call; consumed by previewMatch() to look up
+ * portal-specific templates before falling back to AI matching.
+ * @type {string|null}
+ */
+let currentPageUrl = null;
+
 // ════════════════════════════════════════════════════════════
 // INITIALISATION
 // ════════════════════════════════════════════════════════════
@@ -144,6 +153,43 @@ document.addEventListener('DOMContentLoaded', () => {
     handleExtract({ profileSelect, extractBtn, extractBtnLabel,
                     extractBtnIcon, uploadStatus });
   });
+
+  // ── Wire "Check last upload status" link ──────────────────────
+  const checkStatusLink = document.getElementById('check-upload-status');
+  if (checkStatusLink) {
+    checkStatusLink.addEventListener('click', async (e) => {
+      e.preventDefault();
+      const profilesStatus = document.getElementById('profiles-tab-status');
+      try {
+        const res = await fetch('http://localhost:8000/profiles/list');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const names = data.profiles ?? [];
+        if (names.length > 0) {
+          setStatus(profilesStatus, `✓ ${names.length} profile(s) on server: ${names.join(', ')}`, 'success');
+        } else {
+          setStatus(profilesStatus, '⚠ No profiles found on server.', 'error');
+        }
+      } catch (err) {
+        setStatus(profilesStatus, '⚠ Backend unreachable — cannot check status.', 'error');
+        console.warn('[Fillosophy] Check upload status failed:', err.message);
+      }
+    });
+  }
+
+  // ── Wire export-JSON button ────────────────────────────────────
+  const exportJsonBtn = document.getElementById('export-json-btn');
+  if (exportJsonBtn) {
+    exportJsonBtn.addEventListener('click', handleExportJson);
+  }
+
+  // ── Wire import button + hidden file input ─────────────────────
+  const importBtn       = document.getElementById('import-btn');
+  const importFileInput = document.getElementById('import-file-input');
+  if (importBtn && importFileInput) {
+    importBtn.addEventListener('click', () => importFileInput.click());
+    importFileInput.addEventListener('change', handleImportJson);
+  }
 
   // ── Wire Switch profile link ──────────────────────────────────
   const switchProfileBtn = document.getElementById('switch-profile-btn');
@@ -370,6 +416,10 @@ async function handleExtract(els) {
 
   // Loading state
   setLoadingState(extractBtn, extractBtnLabel, extractBtnIcon, true);
+  // NOTE: If the popup closes during extraction, the fetch is aborted.
+  // The backend will have still processed and saved the profile if it
+  // reached that point — the user can reopen the popup and switch to
+  // the Profiles tab to check if it succeeded.
   setStatus(uploadStatus, '', '');
 
   // Build multipart payload
@@ -444,6 +494,212 @@ async function handleExtract(els) {
 }
 
 // ════════════════════════════════════════════════════════════
+// PROFILE EXPORT
+// ════════════════════════════════════════════════════════════
+
+/**
+ * Exports the current active profile as a formatted JSON file.
+ * Uses chrome.downloads.download() for reliable Manifest V3 popup downloads
+ * with a blob-anchor fallback.
+ */
+async function handleExportJson() {
+  const profilesStatus = document.getElementById('profiles-tab-status');
+
+  // ── Guard: no profile loaded ──────────────────────────────────────────────
+  if (!currentProfile) {
+    if (profilesStatus) {
+      setStatus(profilesStatus, '⚠ No active profile to export.', 'error');
+    }
+    console.warn('[Fillosophy] Export aborted — no active profile.');
+    return;
+  }
+
+  // ── Get the active profile name from storage ──────────────────────────────
+  let activeProfileName;
+  try {
+    activeProfileName = await getActiveProfile();
+    if (!activeProfileName) {
+      activeProfileName = 'profile';
+      console.warn('[Fillosophy] No active profile name in storage — using fallback.');
+    }
+  } catch (err) {
+    activeProfileName = 'profile';
+    console.warn('[Fillosophy] getActiveProfile failed, using fallback name:', err.message);
+  }
+
+  // ── Build export payload ──────────────────────────────────────────────────
+  const exportPayload = {
+    fillosophy_export_version: '1.0',
+    exported_at: new Date().toISOString(),
+    profile_name: activeProfileName,
+    profile_data: currentProfile,
+  };
+
+  const jsonString = JSON.stringify(exportPayload, null, 2);
+  const filename   = `fillosophy_${activeProfileName.toLowerCase()}_${Date.now()}.json`;
+
+  // ── Trigger download ──────────────────────────────────────────────────────
+  const blob = new Blob([jsonString], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+
+  let downloadSucceeded = false;
+
+  // Primary: chrome.downloads API (reliable in MV3 popups)
+  if (typeof chrome !== 'undefined' && chrome.downloads && chrome.downloads.download) {
+    try {
+      await new Promise((resolve, reject) => {
+        chrome.downloads.download(
+          { url, filename, saveAs: false },
+          (downloadId) => {
+            if (chrome.runtime.lastError) {
+              reject(new Error(chrome.runtime.lastError.message));
+            } else {
+              resolve(downloadId);
+            }
+          }
+        );
+      });
+      downloadSucceeded = true;
+    } catch (dlErr) {
+      console.warn('[Fillosophy] chrome.downloads failed, falling back to anchor:', dlErr.message);
+    }
+  }
+
+  // Fallback: temporary anchor element
+  if (!downloadSucceeded) {
+    const a  = document.createElement('a');
+    a.href     = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    downloadSucceeded = true;
+  }
+
+  URL.revokeObjectURL(url);
+
+  // ── Status feedback ───────────────────────────────────────────────────────
+  if (profilesStatus) {
+    setStatus(profilesStatus, `✓ Profile exported as ${filename}`, 'success');
+  }
+  console.log(`[Fillosophy] Profile exported: ${activeProfileName}`);
+}
+
+// ════════════════════════════════════════════════════════════
+// PROFILE IMPORT
+// ════════════════════════════════════════════════════════════
+
+/** Backend endpoint for profile import sync. */
+const IMPORT_URL = 'http://localhost:8000/profiles/import';
+
+/**
+ * Handles the hidden file-input change event to import a Fillosophy
+ * JSON profile.  Validates structure, confirms overwrites, persists to
+ * chrome.storage + backend, and refreshes the Profiles tab UI.
+ *
+ * @param {Event} event - The file-input 'change' event.
+ */
+async function handleImportJson(event) {
+  const profilesStatus  = document.getElementById('profiles-tab-status');
+  const importFileInput = document.getElementById('import-file-input');
+
+  // ── Guard: no file selected ───────────────────────────────────────────────
+  const file = event.target.files?.[0];
+  if (!file) return;
+
+  // ── Validate file extension ───────────────────────────────────────────────
+  if (!file.name.endsWith('.json')) {
+    setStatus(profilesStatus, '✗ Please select a valid .json file', 'error');
+    if (importFileInput) importFileInput.value = '';
+    return;
+  }
+
+  // ── Read and parse ────────────────────────────────────────────────────────
+  let parsed;
+  try {
+    const text = await file.text();
+    parsed = JSON.parse(text);
+
+    // Validate required top-level keys
+    if (!parsed.profile_name || !parsed.profile_data) {
+      throw new Error('Missing required fields: profile_name or profile_data');
+    }
+
+    // Validate profile_data has at least one expected key
+    const requiredKeys  = ['full_name', 'email', 'skills'];
+    const hasValidShape = requiredKeys.some((k) => k in parsed.profile_data);
+    if (!hasValidShape) {
+      throw new Error('File does not match Fillosophy profile format');
+    }
+  } catch (err) {
+    setStatus(profilesStatus, `✗ Invalid file: ${err.message}`, 'error');
+    if (importFileInput) importFileInput.value = '';
+    return;
+  }
+
+  // ── Overwrite confirmation ────────────────────────────────────────────────
+  try {
+    const existing = await getProfile(parsed.profile_name);
+    if (existing) {
+      const confirmed = confirm(
+        `A profile named "${parsed.profile_name}" already exists. Overwrite it?`
+      );
+      if (!confirmed) {
+        console.log('[Fillosophy] Import cancelled by user (overwrite declined).');
+        if (importFileInput) importFileInput.value = '';
+        return;
+      }
+    }
+  } catch (lookupErr) {
+    // Non-fatal — proceed with import even if lookup fails
+    console.warn('[Fillosophy] Profile lookup failed, proceeding with import:', lookupErr.message);
+  }
+
+  // ── Save to chrome.storage ────────────────────────────────────────────────
+  try {
+    await saveProfile(parsed.profile_name, parsed.profile_data);
+    await setActiveProfile(parsed.profile_name);
+    currentProfile = parsed.profile_data;
+    console.log(`[Fillosophy] Profile saved to chrome.storage: ${parsed.profile_name}`);
+  } catch (storageErr) {
+    setStatus(profilesStatus, `✗ Import failed: ${storageErr.message}`, 'error');
+    if (importFileInput) importFileInput.value = '';
+    return;
+  }
+
+  // ── Update the UI ─────────────────────────────────────────────────────────
+  displayProfile(parsed.profile_data);
+  setActiveProfileRadio(parsed.profile_name);
+
+  // ── Invalidate cached field mapping (same as profile-switch logic) ────────
+  fieldMapping       = {};
+  lastMatchTimestamp = null;
+
+  // ── Show success ──────────────────────────────────────────────────────────
+  setStatus(profilesStatus, `✓ Imported profile: ${parsed.profile_name}`, 'success');
+  console.log(`[Fillosophy] Profile imported: ${parsed.profile_name}`);
+
+  // ── Sync to backend (non-blocking) ────────────────────────────────────────
+  try {
+    const res = await fetch(IMPORT_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        profile_name: parsed.profile_name,
+        profile_data: parsed.profile_data,
+      }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    console.log('[Fillosophy] Backend sync successful for imported profile.');
+  } catch (syncErr) {
+    console.warn('[Fillosophy] Backend sync failed, profile saved locally only:', syncErr.message);
+  }
+
+  // ── Reset file input so the same file can be re-imported ──────────────────
+  if (importFileInput) importFileInput.value = '';
+}
+
+// ════════════════════════════════════════════════════════════
 // PROFILE DISPLAY
 // ════════════════════════════════════════════════════════════
 
@@ -457,7 +713,14 @@ function displayProfile(profile) {
   // ── Populate preview inputs ─────────────────────────────────────────────
   const set = (id, value) => {
     const el = document.getElementById(id);
-    if (el) el.value = value;
+    if (!el) return;
+    // Show '—' for null, undefined, empty string, and the literal string "null"
+    // but preserve numeric 0 and other falsy-but-valid values
+    if (value == null || value === '' || value === 'null') {
+      el.value = '—';
+    } else {
+      el.value = value;
+    }
   };
 
   set('profile-field-name',   profile.full_name ?? '—');
@@ -523,8 +786,9 @@ async function loadAutofillTab() {
     if (pageInfo?.status === 'error') {
       throw new Error(pageInfo.message ?? 'Content script not reachable');
     }
-    if (urlEl) urlEl.textContent = pageInfo.url ?? 'Unknown URL';
-    console.log(`[Fillosophy] Page info loaded — ${pageInfo.fieldCount} field(s) on ${pageInfo.url}`);
+    currentPageUrl = pageInfo.url ?? null;
+    if (urlEl) urlEl.textContent = currentPageUrl ?? 'Unknown URL';
+    console.log(`[Fillosophy] Page info loaded — ${pageInfo.fieldCount} field(s) on ${currentPageUrl}`);
   } catch (pageErr) {
     console.warn('[Fillosophy] GET_PAGE_INFO failed:', pageErr.message);
     if (urlEl)       urlEl.textContent       = 'Unavailable';
@@ -605,6 +869,12 @@ async function loadAutofillTab() {
 /**
  * Calls the /match endpoint to get a preview of the fill confidence.
  * Records lastMatchTimestamp on success and wires the Autofill button.
+ *
+ * Template-first strategy:
+ *   1. Try applyTemplateMatching() for the current page URL.
+ *   2. If ALL fields matched via template → skip the /match API call.
+ *   3. If SOME matched → send only unmatched fields to /match, then merge.
+ *   4. If no template exists → full AI matching (original behaviour).
  */
 async function previewMatch() {
   if (fieldLabels.length === 0 || !currentProfile) return;
@@ -619,42 +889,92 @@ async function previewMatch() {
   if (needsReviewEl)    needsReviewEl.textContent    = '...';
 
   try {
-    const response = await fetch('http://localhost:8000/match', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ profile: currentProfile, fields: fieldLabels })
-    });
+    // ── Step A: Try template matching first ──────────────────────────────────
+    const templateResult = applyTemplateMatching(fieldLabels, currentProfile, currentPageUrl);
 
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}`);
-    }
+    if (templateResult && templateResult.unmatched.length === 0) {
+      // ── Fully matched via template — skip AI entirely ─────────────────────
+      fieldMapping       = templateResult.matched;
+      lastMatchTimestamp = Date.now();
 
-    const data = await response.json();
-    fieldMapping = data.mapping || {};
+      const totalFields    = Object.keys(fieldMapping).length;
+      const highConfidence = totalFields; // template confidence is always high
+      const needsReview    = 0;
 
-    // Record when we last got a fresh mapping
-    lastMatchTimestamp = Date.now();
+      if (fieldsFoundEl)    fieldsFoundEl.textContent    = totalFields;
+      if (highConfidenceEl) highConfidenceEl.textContent = highConfidence;
+      if (needsReviewEl)    needsReviewEl.textContent    = needsReview;
 
-    if (fieldsFoundEl)    fieldsFoundEl.textContent    = data.total_fields;
-    if (highConfidenceEl) highConfidenceEl.textContent = data.high_confidence;
-    if (needsReviewEl)    needsReviewEl.textContent    = data.needs_review;
-
-    if (data.needs_review > 0) {
       if (tabStatus) {
-        tabStatus.textContent = `⚠ ${data.needs_review} field(s) will be flagged for review.`;
-        tabStatus.className   = 'upload-status amber';
-      }
-    } else {
-      if (tabStatus) {
-        tabStatus.textContent = '✓ All fields matched with high confidence.';
+        tabStatus.textContent = '✓ All fields matched via template — no AI call needed.';
         tabStatus.className   = 'upload-status success';
       }
+
+      console.log(`[Fillosophy] Fully matched via template, skipping AI call (${totalFields} fields)`);
+
+    } else {
+      // ── Determine which fields to send to AI ──────────────────────────────
+      const fieldsForAI       = templateResult ? templateResult.unmatched : fieldLabels;
+      const templateMatched   = templateResult ? templateResult.matched   : {};
+      const templateMatchCount = Object.keys(templateMatched).length;
+
+      if (templateResult) {
+        console.log(
+          `[Fillosophy] ${templateMatchCount} matched via template, ` +
+          `${fieldsForAI.length} sent to AI`
+        );
+      }
+
+      // ── Call /match with only the fields that need AI ─────────────────────
+      const response = await fetch('http://localhost:8000/match', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ profile: currentProfile, fields: fieldsForAI }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const data     = await response.json();
+      const aiMapping = data.mapping || {};
+
+      // ── Merge: template matches (high confidence) + AI matches ────────────
+      fieldMapping       = { ...templateMatched, ...aiMapping };
+      lastMatchTimestamp  = Date.now();
+
+      // Recompute stats from the merged mapping
+      const totalFields    = Object.keys(fieldMapping).length;
+      const highConfidence = Object.values(fieldMapping)
+        .filter((m) => (m.confidence ?? 0) >= 80).length;
+      const needsReview    = totalFields - highConfidence;
+
+      if (fieldsFoundEl)    fieldsFoundEl.textContent    = totalFields;
+      if (highConfidenceEl) highConfidenceEl.textContent = highConfidence;
+      if (needsReviewEl)    needsReviewEl.textContent    = needsReview;
+
+      if (needsReview > 0) {
+        if (tabStatus) {
+          tabStatus.textContent = `⚠ ${needsReview} field(s) will be flagged for review.`;
+          tabStatus.className   = 'upload-status amber';
+        }
+      } else {
+        if (tabStatus) {
+          const extra = templateMatchCount > 0
+            ? ` (${templateMatchCount} via template)`
+            : '';
+          tabStatus.textContent = `✓ All fields matched with high confidence${extra}.`;
+          tabStatus.className   = 'upload-status success';
+        }
+      }
+
+      console.log('[Fillosophy] Match preview complete. Mapping ready.');
     }
 
+    // ── Wire autofill button (shared for both template-only and AI paths) ───
     if (autofillBtn) {
       autofillBtn.disabled = false;
 
-      // ── Autofill button click handler ─────────────────────────────────────
       // Clone to remove any previous listener before attaching a fresh one
       const freshBtn = autofillBtn.cloneNode(true);
       autofillBtn.parentNode.replaceChild(freshBtn, autofillBtn);
@@ -727,8 +1047,6 @@ async function previewMatch() {
         }
       });
     }
-
-    console.log('[Fillosophy] Match preview complete. Mapping ready.');
 
   } catch (err) {
     console.error('[Fillosophy] Match preview failed:', err);
