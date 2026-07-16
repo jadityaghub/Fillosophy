@@ -1,6 +1,7 @@
 // Fillosophy — Popup controller | Tab switching, PDF upload, backend fetch
+// Wires the nand-redesigned HTML to main's backend endpoints and extension logic.
 
-import { saveProfile, setActiveProfile, getProfile, getActiveProfile } from '../utils/storage.js';
+import { saveProfile, setActiveProfile, getProfile, getActiveProfile, listProfiles, deleteProfile } from '../utils/storage.js';
 import { applyTemplateMatching } from '../utils/templates.js';
 
 // ════════════════════════════════════════════════════════════
@@ -15,6 +16,9 @@ const DEFAULT_TAB = 'upload';
 
 /** Backend endpoint for resume extraction. */
 const EXTRACT_URL = 'http://localhost:8000/extract';
+
+/** Backend endpoint for profile import sync. */
+const IMPORT_URL = 'http://localhost:8000/profiles/import';
 
 /** Only PDFs are accepted by the upload flow. */
 const ACCEPTED_MIME = 'application/pdf';
@@ -75,7 +79,7 @@ let _tabPanels = {};
 
 /**
  * Full descriptor objects returned by the last DETECT_FIELDS call.
- * Consumed by the autofill handler in Week 5 to map matches back to elements.
+ * Consumed by the autofill handler to map matches back to elements.
  * @type {Object[]}
  */
 let detectedFields = [];
@@ -128,10 +132,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const fileInput       = document.getElementById('resume-file-input');
   const dropzoneTitle   = document.getElementById('dropzone-title');
   const dropzoneSub     = document.getElementById('dropzone-sub');
-  const profileSelect   = document.getElementById('profile-name-select');
   const extractBtn      = document.getElementById('extract-btn');
   const extractBtnLabel = document.getElementById('extract-btn-label');
-  const extractBtnIcon  = document.getElementById('extract-btn-icon');
   const uploadStatus    = document.getElementById('upload-status');
 
   // ── Initial state ───────────────────────────────────────
@@ -149,32 +151,16 @@ document.addEventListener('DOMContentLoaded', () => {
                  extractBtn, uploadStatus });
 
   // ── Wire extract button ────────────────────────────────────────
+  // Nand redesign removed the profile-name select dropdown.
+  // We use the currently active profile from storage, or default to 'personal'.
   extractBtn.addEventListener('click', () => {
-    handleExtract({ profileSelect, extractBtn, extractBtnLabel,
-                    extractBtnIcon, uploadStatus });
+    handleExtract({ extractBtn, extractBtnLabel, uploadStatus });
   });
 
-  // ── Wire "Check last upload status" link ──────────────────────
-  const checkStatusLink = document.getElementById('check-upload-status');
-  if (checkStatusLink) {
-    checkStatusLink.addEventListener('click', async (e) => {
-      e.preventDefault();
-      const profilesStatus = document.getElementById('profiles-tab-status');
-      try {
-        const res = await fetch('http://localhost:8000/profiles/list');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        const names = data.profiles ?? [];
-        if (names.length > 0) {
-          setStatus(profilesStatus, `✓ ${names.length} profile(s) on server: ${names.join(', ')}`, 'success');
-        } else {
-          setStatus(profilesStatus, '⚠ No profiles found on server.', 'error');
-        }
-      } catch (err) {
-        setStatus(profilesStatus, '⚠ Backend unreachable — cannot check status.', 'error');
-        console.warn('[Fillosophy] Check upload status failed:', err.message);
-      }
-    });
+  // ── Wire header refresh button ─────────────────────────────────
+  const headerRefreshBtn = document.getElementById('header-refresh-btn');
+  if (headerRefreshBtn) {
+    headerRefreshBtn.addEventListener('click', () => location.reload());
   }
 
   // ── Wire export-JSON button ────────────────────────────────────
@@ -191,60 +177,16 @@ document.addEventListener('DOMContentLoaded', () => {
     importFileInput.addEventListener('change', handleImportJson);
   }
 
-  // ── Wire Switch profile link ──────────────────────────────────
+  // ── Wire Switch profile link (Autofill tab → Profiles tab) ─────
   const switchProfileBtn = document.getElementById('switch-profile-btn');
   if (switchProfileBtn) {
     switchProfileBtn.addEventListener('click', () => {
-      // Step 1: Navigate to the Profiles tab
       switchTab('profiles');
-
-      // Step 2: Listen for a radio change — use a named handler so we can
-      // remove it after first use to avoid stacking multiple listeners
-      const onRadioChange = async (e) => {
-        if (e.target.name !== 'active-profile') return;
-
-        const selectedName = e.target.value;
-        console.log(`[Fillosophy] Profile radio changed to: ${selectedName}`);
-
-        // Fetch saved profile data from storage
-        const profileData = await getProfile(selectedName);
-        const profilesTabStatus = document.getElementById('upload-status');
-
-        if (!profileData) {
-          // No uploaded data for this slot — warn the user
-          const warnEl = document.querySelector('#panel-profiles .upload-status') ||
-                         document.createElement('p');
-          warnEl.textContent = `⚠ No data found for “${selectedName}”. Upload a resume under this profile first.`;
-          warnEl.className   = 'upload-status error';
-          // Ensure it's inside the profiles panel if it was just created
-          const profilesPanel = document.getElementById('panel-profiles');
-          if (profilesPanel && !profilesPanel.contains(warnEl)) {
-            profilesPanel.appendChild(warnEl);
-          }
-          console.warn(`[Fillosophy] No profile data found for: ${selectedName}`);
-          return;
-        }
-
-        // Step 2b: Apply the newly selected profile
-        currentProfile = profileData;
-        await setActiveProfile(selectedName);
-        displayProfile(profileData);
-        console.log(`[Fillosophy] Switched active profile to: ${selectedName}`);
-
-        // Step 2c: Invalidate cached field mapping — forces fresh match on
-        // next Autofill tab open (lastMatchTimestamp=null bypasses the 60-s check)
-        fieldMapping        = {};
-        lastMatchTimestamp  = null;
-        console.log('[Fillosophy] Field mapping invalidated due to profile switch');
-      };
-
-      // Attach to the profiles panel radio group; remove after any selection
-      const profilesPanel = document.getElementById('panel-profiles');
-      if (profilesPanel) {
-        profilesPanel.addEventListener('change', onRadioChange);
-      }
     });
   }
+
+  // ── Load profile chips on startup ──────────────────────────────
+  renderProfileChips();
 });
 
 // ════════════════════════════════════════════════════════════
@@ -286,11 +228,245 @@ function switchTab(tabId) {
   if (tabId === 'autofill') {
     loadAutofillTab();
   }
+
+  // Side-effect: refresh profile chips when the Profiles tab becomes active
+  if (tabId === 'profiles') {
+    renderProfileChips();
+  }
 }
 
 // Keep the old name around in case other code calls activateTab directly
 function activateTab(tabId, tabBtns, tabPanels) {
   switchTab(tabId);
+}
+
+// ════════════════════════════════════════════════════════════
+// PROFILE CHIP PICKER  (replaces main's radio-group system)
+// ════════════════════════════════════════════════════════════
+
+/**
+ * Renders profile chips inside the #profiles-profile-picker container.
+ * Queries chrome.storage for saved profiles via listProfiles(), then
+ * builds clickable chips with the active one highlighted.
+ * Also appends a "+ Add" chip for creating new profile slots.
+ */
+async function renderProfileChips() {
+  const container = document.getElementById('profiles-profile-picker');
+  if (!container) return;
+
+  // Fetch saved profile names and the active one
+  let profileNames = [];
+  let activeName   = null;
+
+  try {
+    profileNames = await listProfiles();
+    activeName   = await getActiveProfile();
+  } catch (err) {
+    console.warn('[Fillosophy] Failed to load profiles for chips:', err.message);
+  }
+
+  // Ensure at least the three default slots exist visually
+  const defaults = ['personal', 'academic', 'job'];
+  for (const d of defaults) {
+    if (!profileNames.includes(d)) {
+      profileNames.push(d);
+    }
+  }
+
+  // If no active profile is set yet, default to 'personal'
+  if (!activeName) {
+    activeName = 'personal';
+  }
+
+  // Clear container
+  container.innerHTML = '';
+
+  // Build a chip for each profile
+  for (const name of profileNames) {
+    const chip = document.createElement('button');
+    chip.className = 'profile-chip' + (name === activeName ? ' active' : '');
+    chip.type = 'button';
+
+    // Capitalise label for display
+    const displayName = name.charAt(0).toUpperCase() + name.slice(1);
+    chip.textContent = displayName;
+
+    // Only show options button for non-default profiles
+    if (!defaults.includes(name)) {
+      const optionsBtn = document.createElement('button');
+      optionsBtn.className = 'chip-options-btn';
+      optionsBtn.type = 'button';
+      optionsBtn.textContent = '⋯';
+      optionsBtn.title = `Options for ${displayName}`;
+      optionsBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        handleChipOptions(name);
+      });
+      chip.appendChild(optionsBtn);
+    }
+
+    chip.addEventListener('click', () => handleChipSelect(name));
+    container.appendChild(chip);
+  }
+
+  // Append the "+ Add" chip
+  const addChip = document.createElement('button');
+  addChip.className = 'profile-chip add-chip';
+  addChip.type = 'button';
+  addChip.textContent = '+ Add';
+  addChip.addEventListener('click', () => handleAddProfileChip(container));
+  container.appendChild(addChip);
+
+  // Load the active profile's data into the preview
+  if (activeName) {
+    try {
+      const profileData = await getProfile(activeName);
+      if (profileData) {
+        currentProfile = profileData;
+        displayProfile(profileData);
+      }
+    } catch (err) {
+      console.warn('[Fillosophy] Failed to load active profile data:', err.message);
+    }
+  }
+}
+
+/**
+ * Handles clicking a profile chip — sets it as active and refreshes the UI.
+ *
+ * @param {string} name - Profile name to activate.
+ */
+async function handleChipSelect(name) {
+  const profilesTabStatus = document.getElementById('profiles-tab-status');
+
+  try {
+    const profileData = await getProfile(name);
+
+    if (!profileData) {
+      setStatus(profilesTabStatus,
+        `⚠ No data found for "${name}". Upload a resume under this profile first.`, 'error');
+      console.warn(`[Fillosophy] No profile data found for: ${name}`);
+      // Still set as active so extracts go to this slot
+      await setActiveProfile(name);
+      renderProfileChips();
+      return;
+    }
+
+    // Apply the selected profile
+    currentProfile = profileData;
+    await setActiveProfile(name);
+    displayProfile(profileData);
+    console.log(`[Fillosophy] Switched active profile to: ${name}`);
+
+    // Invalidate cached field mapping — forces fresh match on next Autofill tab open
+    fieldMapping       = {};
+    lastMatchTimestamp  = null;
+    console.log('[Fillosophy] Field mapping invalidated due to profile switch');
+
+    setStatus(profilesTabStatus, '', '');
+
+  } catch (err) {
+    console.warn('[Fillosophy] Profile switch failed:', err.message);
+    setStatus(profilesTabStatus, `⚠ Failed to switch profile: ${err.message}`, 'error');
+  }
+
+  // Re-render chips to update active state
+  renderProfileChips();
+}
+
+/**
+ * Handles the "+ Add" chip — replaces it with an inline text input.
+ * On Enter or blur, creates the new profile slot.
+ *
+ * @param {HTMLElement} container - The profile picker container.
+ */
+function handleAddProfileChip(container) {
+  // Check if an input already exists
+  if (container.querySelector('.profile-chip-input')) return;
+
+  // Remove the add-chip temporarily
+  const addChip = container.querySelector('.add-chip');
+  if (addChip) addChip.remove();
+
+  // Create inline input
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'profile-chip-input';
+  input.placeholder = 'Profile name…';
+  input.maxLength = 30;
+  container.appendChild(input);
+  input.focus();
+
+  const commitName = async () => {
+    const name = input.value.trim().toLowerCase();
+    input.remove();
+
+    if (name && name.length > 0) {
+      try {
+        // Set as active — even though it has no data yet, the user
+        // can then upload a resume while this profile is selected
+        await setActiveProfile(name);
+        console.log(`[Fillosophy] New profile slot created: ${name}`);
+      } catch (err) {
+        console.warn('[Fillosophy] Failed to create profile:', err.message);
+      }
+    }
+
+    // Re-render (will include the new profile if it was set as active)
+    renderProfileChips();
+  };
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitName();
+    } else if (e.key === 'Escape') {
+      input.remove();
+      renderProfileChips();
+    }
+  });
+
+  input.addEventListener('blur', commitName);
+}
+
+/**
+ * Handles the ⋯ options button on custom (non-default) profile chips.
+ * Shows a confirm dialog to delete the profile.
+ *
+ * @param {string} name - Profile name to manage.
+ */
+async function handleChipOptions(name) {
+  const displayName = name.charAt(0).toUpperCase() + name.slice(1);
+  const confirmed = confirm(`Delete profile "${displayName}"?`);
+
+  if (!confirmed) return;
+
+  try {
+    await deleteProfile(name);
+
+    // If the deleted profile was active, switch to 'personal'
+    const activeName = await getActiveProfile();
+    if (activeName === name) {
+      await setActiveProfile('personal');
+    }
+
+    console.log(`[Fillosophy] Profile deleted: ${name}`);
+  } catch (err) {
+    console.warn('[Fillosophy] Failed to delete profile:', err.message);
+  }
+
+  renderProfileChips();
+}
+
+/**
+ * Sets the visual active state on the chip matching profileName.
+ * Used after imports to sync the chip UI.
+ *
+ * @param {string} profileName - e.g. "personal" | "academic" | "job"
+ */
+function setActiveProfileChip(profileName) {
+  renderProfileChips();
+  console.log(`[Fillosophy] Active profile chip updated to: ${profileName}`);
 }
 
 // ════════════════════════════════════════════════════════════
@@ -400,26 +576,32 @@ function applyFileSelection(file, els) {
  * On success: stores the profile, updates the Profiles tab, and switches to it.
  * On failure: surfaces the error in the status bar.
  *
+ * Uses the currently active profile name from storage (or defaults to 'personal')
+ * since the nand redesign removed the profile-name select dropdown.
+ *
  * @param {Object} els - Named DOM element references.
  */
 async function handleExtract(els) {
-  const { profileSelect, extractBtn, extractBtnLabel,
-          extractBtnIcon, uploadStatus } = els;
+  const { extractBtn, extractBtnLabel, uploadStatus } = els;
 
   if (!selectedFile) {
     console.warn('[Fillosophy Upload] handleExtract called without a selected file.');
     return;
   }
 
-  const profileName = profileSelect?.value ?? 'personal';
+  // Determine profile name from storage (nand removed the select dropdown)
+  let profileName = 'personal';
+  try {
+    const active = await getActiveProfile();
+    if (active) profileName = active;
+  } catch (err) {
+    console.warn('[Fillosophy] getActiveProfile failed, using default:', err.message);
+  }
+
   console.log(`[Fillosophy Upload] Starting extract — file: "${selectedFile.name}", profile: "${profileName}"`);
 
   // Loading state
-  setLoadingState(extractBtn, extractBtnLabel, extractBtnIcon, true);
-  // NOTE: If the popup closes during extraction, the fetch is aborted.
-  // The backend will have still processed and saved the profile if it
-  // reached that point — the user can reopen the popup and switch to
-  // the Profiles tab to check if it succeeded.
+  setLoadingState(extractBtn, extractBtnLabel, true);
   setStatus(uploadStatus, '', '');
 
   // Build multipart payload
@@ -488,8 +670,8 @@ async function handleExtract(els) {
     extractBtn.disabled = false;
 
   } finally {
-    // Restore button label/icon regardless of outcome
-    setLoadingState(extractBtn, extractBtnLabel, extractBtnIcon, false);
+    // Restore button label regardless of outcome
+    setLoadingState(extractBtn, extractBtnLabel, false);
   }
 }
 
@@ -589,9 +771,6 @@ async function handleExportJson() {
 // PROFILE IMPORT
 // ════════════════════════════════════════════════════════════
 
-/** Backend endpoint for profile import sync. */
-const IMPORT_URL = 'http://localhost:8000/profiles/import';
-
 /**
  * Handles the hidden file-input change event to import a Fillosophy
  * JSON profile.  Validates structure, confirms overwrites, persists to
@@ -669,7 +848,7 @@ async function handleImportJson(event) {
 
   // ── Update the UI ─────────────────────────────────────────────────────────
   displayProfile(parsed.profile_data);
-  setActiveProfileRadio(parsed.profile_name);
+  setActiveProfileChip(parsed.profile_name);
 
   // ── Invalidate cached field mapping (same as profile-switch logic) ────────
   fieldMapping       = {};
@@ -705,7 +884,7 @@ async function handleImportJson(event) {
 
 /**
  * Populates the readonly preview fields in the Profiles tab with extracted
- * profile data and syncs the active-profile radio button.
+ * profile data.
  *
  * @param {Object} profile - Structured profile dict returned by /extract.
  */
@@ -898,155 +1077,80 @@ async function previewMatch() {
       lastMatchTimestamp = Date.now();
 
       const totalFields    = Object.keys(fieldMapping).length;
-      const highConfidence = totalFields; // template confidence is always high
-      const needsReview    = 0;
 
       if (fieldsFoundEl)    fieldsFoundEl.textContent    = totalFields;
-      if (highConfidenceEl) highConfidenceEl.textContent = highConfidence;
-      if (needsReviewEl)    needsReviewEl.textContent    = needsReview;
+      if (highConfidenceEl) highConfidenceEl.textContent = totalFields;
+      if (needsReviewEl)    needsReviewEl.textContent    = 0;
 
       if (tabStatus) {
-        tabStatus.textContent = '✓ All fields matched via template — no AI call needed.';
+        tabStatus.textContent = `✓ All ${totalFields} field(s) matched via template (no AI needed).`;
         tabStatus.className   = 'upload-status success';
       }
+      if (autofillBtn) autofillBtn.disabled = false;
 
-      console.log(`[Fillosophy] Fully matched via template, skipping AI call (${totalFields} fields)`);
+      console.log('[Fillosophy] Full template match — AI skipped.');
+      wireAutofillButton();
+      return;
+    }
 
+    // ── Step B: Partial or no template match — call AI /match ────────────────
+    const templateMatched    = templateResult?.matched  ?? {};
+    const fieldsForAI        = templateResult?.unmatched ?? fieldLabels;
+    const templateMatchCount = Object.keys(templateMatched).length;
+
+    if (templateMatchCount > 0) {
+      console.log(`[Fillosophy] Template matched ${templateMatchCount} fields; sending ${fieldsForAI.length} to AI.`);
+    }
+
+    const response = await fetch('http://localhost:8000/match/', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({
+        fields:  fieldsForAI,
+        profile: currentProfile,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Match API returned HTTP ${response.status}`);
+    }
+
+    const data     = await response.json();
+    const aiMapping = data.mapping || {};
+
+    // ── Merge: template matches (high confidence) + AI matches ────────────
+    fieldMapping       = { ...templateMatched, ...aiMapping };
+    lastMatchTimestamp  = Date.now();
+
+    // Recompute stats from the merged mapping
+    const totalFields    = Object.keys(fieldMapping).length;
+    const highConfidence = Object.values(fieldMapping)
+      .filter((m) => (m.confidence ?? 0) >= 80).length;
+    const needsReview    = totalFields - highConfidence;
+
+    if (fieldsFoundEl)    fieldsFoundEl.textContent    = totalFields;
+    if (highConfidenceEl) highConfidenceEl.textContent = highConfidence;
+    if (needsReviewEl)    needsReviewEl.textContent    = needsReview;
+
+    if (needsReview > 0) {
+      if (tabStatus) {
+        tabStatus.textContent = `⚠ ${needsReview} field(s) will be flagged for review.`;
+        tabStatus.className   = 'upload-status amber';
+      }
     } else {
-      // ── Determine which fields to send to AI ──────────────────────────────
-      const fieldsForAI       = templateResult ? templateResult.unmatched : fieldLabels;
-      const templateMatched   = templateResult ? templateResult.matched   : {};
-      const templateMatchCount = Object.keys(templateMatched).length;
-
-      if (templateResult) {
-        console.log(
-          `[Fillosophy] ${templateMatchCount} matched via template, ` +
-          `${fieldsForAI.length} sent to AI`
-        );
+      if (tabStatus) {
+        const extra = templateMatchCount > 0
+          ? ` (${templateMatchCount} via template)`
+          : '';
+        tabStatus.textContent = `✓ All fields matched with high confidence${extra}.`;
+        tabStatus.className   = 'upload-status success';
       }
-
-      // ── Call /match with only the fields that need AI ─────────────────────
-      const response = await fetch('http://localhost:8000/match', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ profile: currentProfile, fields: fieldsForAI }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      const data     = await response.json();
-      const aiMapping = data.mapping || {};
-
-      // ── Merge: template matches (high confidence) + AI matches ────────────
-      fieldMapping       = { ...templateMatched, ...aiMapping };
-      lastMatchTimestamp  = Date.now();
-
-      // Recompute stats from the merged mapping
-      const totalFields    = Object.keys(fieldMapping).length;
-      const highConfidence = Object.values(fieldMapping)
-        .filter((m) => (m.confidence ?? 0) >= 80).length;
-      const needsReview    = totalFields - highConfidence;
-
-      if (fieldsFoundEl)    fieldsFoundEl.textContent    = totalFields;
-      if (highConfidenceEl) highConfidenceEl.textContent = highConfidence;
-      if (needsReviewEl)    needsReviewEl.textContent    = needsReview;
-
-      if (needsReview > 0) {
-        if (tabStatus) {
-          tabStatus.textContent = `⚠ ${needsReview} field(s) will be flagged for review.`;
-          tabStatus.className   = 'upload-status amber';
-        }
-      } else {
-        if (tabStatus) {
-          const extra = templateMatchCount > 0
-            ? ` (${templateMatchCount} via template)`
-            : '';
-          tabStatus.textContent = `✓ All fields matched with high confidence${extra}.`;
-          tabStatus.className   = 'upload-status success';
-        }
-      }
-
-      console.log('[Fillosophy] Match preview complete. Mapping ready.');
     }
 
-    // ── Wire autofill button (shared for both template-only and AI paths) ───
-    if (autofillBtn) {
-      autofillBtn.disabled = false;
+    console.log('[Fillosophy] Match preview complete. Mapping ready.');
 
-      // Clone to remove any previous listener before attaching a fresh one
-      const freshBtn = autofillBtn.cloneNode(true);
-      autofillBtn.parentNode.replaceChild(freshBtn, autofillBtn);
-
-      freshBtn.addEventListener('click', async () => {
-        const showError = (msg) => {
-          const el = document.getElementById('autofill-tab-status');
-          if (el) { el.textContent = msg; el.className = 'upload-status error'; }
-        };
-
-        // Guard 1 — mapping must exist
-        if (!fieldMapping || Object.keys(fieldMapping).length === 0) {
-          showError('⚠ No field matches available. Reopen this tab to rescan.');
-          return;
-        }
-        // Guard 2 — fields must be detected
-        if (!detectedFields || detectedFields.length === 0) {
-          showError('⚠ No fields detected on this page.');
-          return;
-        }
-
-        // Loading state
-        freshBtn.disabled    = true;
-        freshBtn.textContent = 'Filling form…';
-        // Always re-query — the clone swap may have detached the old reference
-        const getStatus = () => document.getElementById('autofill-tab-status');
-        const st = getStatus();
-        if (st) { st.textContent = ''; st.className = 'upload-status'; }
-
-        try {
-          const res = await sendMessage('APPLY_AUTOFILL', {
-            mapping: fieldMapping,
-            fields:  detectedFields
-          });
-
-          const summary = res?.summary ?? {};
-          const filled  = summary.filled  ?? 0;
-          const flagged = summary.flagged ?? 0;
-
-          // Update stats row with post-fill numbers
-          const hcEl = document.getElementById('stat-high-confidence');
-          const nrEl = document.getElementById('stat-needs-review');
-          if (hcEl) hcEl.textContent = filled;
-          if (nrEl) nrEl.textContent = flagged;
-
-          // Status message
-          const st2 = getStatus();
-          if (st2) {
-            if (flagged > 0) {
-              st2.textContent = `✓ Filled ${filled} field(s). ${flagged} flagged for your review on the page.`;
-              st2.className   = 'upload-status amber';
-            } else {
-              st2.textContent = `✓ All ${filled} field(s) filled successfully!`;
-              st2.className   = 'upload-status success';
-            }
-          }
-
-          console.log('[Fillosophy] Autofill applied:', summary);
-
-        } catch (err) {
-          console.error('[Fillosophy] Autofill failed:', err);
-          const st3 = getStatus();
-          if (st3) {
-            st3.textContent = `✗ Autofill failed. ${err.message}`;
-            st3.className   = 'upload-status error';
-          }
-        } finally {
-          freshBtn.disabled    = false;
-          freshBtn.textContent = '⚡ Autofill This Form';
-        }
-      });
-    }
+    // ── Wire autofill button ────────────────────────────────────────────────
+    wireAutofillButton();
 
   } catch (err) {
     console.error('[Fillosophy] Match preview failed:', err);
@@ -1056,6 +1160,89 @@ async function previewMatch() {
     }
     if (autofillBtn) autofillBtn.disabled = true;
   }
+}
+
+/**
+ * Wires the autofill button click handler. Extracted into a helper so
+ * both the template-only and AI match paths can share it.
+ */
+function wireAutofillButton() {
+  const autofillBtn = document.getElementById('autofill-btn');
+  if (!autofillBtn) return;
+
+  autofillBtn.disabled = false;
+
+  // Clone to remove any previous listener before attaching a fresh one
+  const freshBtn = autofillBtn.cloneNode(true);
+  autofillBtn.parentNode.replaceChild(freshBtn, autofillBtn);
+
+  freshBtn.addEventListener('click', async () => {
+    const showError = (msg) => {
+      const el = document.getElementById('autofill-tab-status');
+      if (el) { el.textContent = msg; el.className = 'upload-status error'; }
+    };
+
+    // Guard 1 — mapping must exist
+    if (!fieldMapping || Object.keys(fieldMapping).length === 0) {
+      showError('⚠ No field matches available. Reopen this tab to rescan.');
+      return;
+    }
+    // Guard 2 — fields must be detected
+    if (!detectedFields || detectedFields.length === 0) {
+      showError('⚠ No fields detected on this page.');
+      return;
+    }
+
+    // Loading state
+    freshBtn.disabled    = true;
+    freshBtn.textContent = 'Filling form…';
+    // Always re-query — the clone swap may have detached the old reference
+    const getStatus = () => document.getElementById('autofill-tab-status');
+    const st = getStatus();
+    if (st) { st.textContent = ''; st.className = 'upload-status'; }
+
+    try {
+      const res = await sendMessage('APPLY_AUTOFILL', {
+        mapping: fieldMapping,
+        fields:  detectedFields
+      });
+
+      const summary = res?.summary ?? {};
+      const filled  = summary.filled  ?? 0;
+      const flagged = summary.flagged ?? 0;
+
+      // Update stats row with post-fill numbers
+      const hcEl = document.getElementById('stat-high-confidence');
+      const nrEl = document.getElementById('stat-needs-review');
+      if (hcEl) hcEl.textContent = filled;
+      if (nrEl) nrEl.textContent = flagged;
+
+      // Status message
+      const st2 = getStatus();
+      if (st2) {
+        if (flagged > 0) {
+          st2.textContent = `✓ Filled ${filled} field(s). ${flagged} flagged for your review on the page.`;
+          st2.className   = 'upload-status amber';
+        } else {
+          st2.textContent = `✓ All ${filled} field(s) filled successfully!`;
+          st2.className   = 'upload-status success';
+        }
+      }
+
+      console.log('[Fillosophy] Autofill applied:', summary);
+
+    } catch (err) {
+      console.error('[Fillosophy] Autofill failed:', err);
+      const st3 = getStatus();
+      if (st3) {
+        st3.textContent = `✗ Autofill failed. ${err.message}`;
+        st3.className   = 'upload-status error';
+      }
+    } finally {
+      freshBtn.disabled    = false;
+      freshBtn.textContent = 'Autofill This Form';
+    }
+  });
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1079,7 +1266,7 @@ async function collectFieldLabels() {
     throw new Error(`DETECT_FIELDS returned status: ${response?.status ?? 'undefined'}`);
   }
 
-  // Store full descriptors for the Week 5 autofill handler
+  // Store full descriptors for the autofill handler
   detectedFields = response.fields ?? [];
 
   // Build the label list using the specified priority order
@@ -1094,24 +1281,6 @@ async function collectFieldLabels() {
 
   console.log(`[Fillosophy] Collected ${labels.length} field labels for matching`);
   return labels;
-}
-
-/**
- * Finds the radio button in the Profiles tab whose value matches profileName
- * and sets it as checked.
- *
- * @param {string} profileName - e.g. "personal" | "academic" | "job"
- */
-function setActiveProfileRadio(profileName) {
-  const radio = document.querySelector(
-    `input[type="radio"][name="active-profile"][value="${profileName}"]`
-  );
-  if (radio) {
-    radio.checked = true;
-    console.log(`[Fillosophy] Active profile radio set to: ${profileName}`);
-  } else {
-    console.warn(`[Fillosophy] No radio found for profile: "${profileName}"`);
-  }
 }
 
 // ════════════════════════════════════════════════════════════
@@ -1132,17 +1301,16 @@ function setStatus(el, message, type) {
 }
 
 /**
- * Swaps button text/icon for loading state and back.
- * Note: disabled state is managed separately by the caller.
+ * Swaps button text for loading state and back.
+ * The nand redesign removed the extract-btn-icon SVG, so this
+ * simplified version only toggles the label text.
  *
  * @param {HTMLButtonElement} btn
  * @param {HTMLElement}       labelEl
- * @param {HTMLElement}       iconEl
  * @param {boolean}           isLoading
  */
-function setLoadingState(btn, labelEl, iconEl, isLoading) {
+function setLoadingState(btn, labelEl, isLoading) {
   if (labelEl) labelEl.textContent  = isLoading ? 'Extracting…' : 'Extract & Save Profile';
-  if (iconEl)  iconEl.style.opacity = isLoading ? '0' : '1';
   // Only force-disable on entry; re-enable decisions are made by the caller
   if (isLoading) btn.disabled = true;
 }

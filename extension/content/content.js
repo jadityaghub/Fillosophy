@@ -192,23 +192,37 @@
   // ════════════════════════════════════════════════════════════
 
   /**
-   * Waits until the number of form fields on the page is stable
-   * for two consecutive 300ms debounce cycles, or until timeoutMs
-   * has elapsed — whichever comes first.
+   * Waits until the number of form fields on the page is stable,
+   * or resolves immediately if the DOM is already settled.
    *
-   * Designed for SPA portals (React / Vue / Angular) where forms render
-   * asynchronously after the initial page load.
+   * Fast-path: if fields are found on the first check and no DOM
+   * mutations occur within 150ms, resolves in ~150ms (static pages).
+   *
+   * Slow-path: for SPAs where forms render asynchronously, watches
+   * for DOM stability with 150ms debounce cycles, up to 1500ms max.
    *
    * @param {number} timeoutMs - Maximum wait time in milliseconds.
    * @returns {Promise<void>}
    */
-  function waitForStableForm(timeoutMs = 3000) {
+  function waitForStableForm(timeoutMs = 1500) {
     return new Promise((resolve) => {
-      const startTime  = Date.now();
-      // ── Wait for DOM to stabilise ────────
+      const startTime = Date.now();
       let lastCount   = 0;
       let stableCount = 0;
       let debounceTid = null;
+      let resolved    = false;
+
+      const done = () => {
+        if (resolved) return;
+        resolved = true;
+        observer.disconnect();
+        clearTimeout(debounceTid);
+        console.log(
+          `[Fillosophy Content] Form stabilized after ${Date.now() - startTime}ms`,
+          `(${lastCount} fields found)`
+        );
+        resolve();
+      };
 
       const checkStability = () => {
         clearTimeout(debounceTid);
@@ -222,46 +236,29 @@
             lastCount   = newCount;
           }
 
-          const elapsed = Date.now() - startTime;
+          // Fast resolve: if fields exist and stable for 1 cycle, done
+          // Full resolve: stable for 2 cycles (handles dynamic rendering)
+          const neededCycles = lastCount > 0 ? 1 : 2;
 
-          // Resolve when stable for 2 consecutive cycles, or on timeout
-          if (stableCount >= 2 || elapsed >= timeoutMs) {
-            observer.disconnect();
-            clearTimeout(debounceTid);
-            console.log(
-              `[Fillosophy Content] Form stabilized after ${elapsed}ms`,
-              `(${lastCount} fields found)`
-            );
-            resolve();
+          if (stableCount >= neededCycles || (Date.now() - startTime) >= timeoutMs) {
+            done();
           } else {
-            // Kick off the next check manually in case there are no mutations (static pages)
             checkStability();
           }
-        }, 300);
+        }, 150); // 150ms debounce (was 300ms)
       };
 
       const observer = new MutationObserver(() => {
-        // Reset stability counter if a mutation happens
+        if (resolved) return;
         stableCount = 0;
         checkStability();
       });
 
       observer.observe(document.body, { childList: true, subtree: true });
-
-      // Start the first check cycle immediately
       checkStability();
 
-      // Hard timeout fallback — always disconnect and resolve
-      setTimeout(() => {
-        observer.disconnect();
-        clearTimeout(debounceTid);
-        const elapsed = Date.now() - startTime;
-        console.log(
-          `[Fillosophy Content] Form stabilized after ${elapsed}ms (timeout),`,
-          `${detectFormFields().length} fields found`
-        );
-        resolve();
-      }, timeoutMs);
+      // Hard timeout fallback
+      setTimeout(done, timeoutMs);
     });
   }
 
