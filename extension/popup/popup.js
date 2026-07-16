@@ -142,9 +142,17 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // ── Wire tabs ───────────────────────────────────────────
   TAB_IDS.forEach((id) => {
-    _tabBtns[id].addEventListener('click', () => switchTab(id));
+    if (_tabBtns[id]) {
+      _tabBtns[id].addEventListener('click', () => switchTab(id));
+    }
   });
-  switchTab(DEFAULT_TAB);
+
+  // ── Retrieve last active tab or set dynamic default ─────
+  chrome.storage.local.get(['last_tab', 'fillosophy_active'], (result) => {
+    const activeProfileName = result?.fillosophy_active?.activeProfile;
+    let initialTab = result?.last_tab || (activeProfileName ? 'autofill' : 'upload');
+    switchTab(initialTab);
+  });
 
   // ── Wire dropzone ───────────────────────────────────────
   initDropzone({ dropzone, fileInput, dropzoneTitle, dropzoneSub,
@@ -223,6 +231,9 @@ function switchTab(tabId) {
 
   const label = tabId.charAt(0).toUpperCase() + tabId.slice(1);
   console.log(`[Fillosophy] Tab switched to: ${label}`);
+
+  // Persist tab state
+  chrome.storage.local.set({ last_tab: tabId });
 
   // Side-effect: refresh live data whenever the Autofill tab becomes active
   if (tabId === 'autofill') {
@@ -942,6 +953,9 @@ async function loadAutofillTab() {
   if (tabStatus)     { tabStatus.textContent = ''; tabStatus.className = 'upload-status'; }
   if (autofillBtn)   autofillBtn.disabled      = true; // Disable until everything is ready
 
+  const previewSection = document.getElementById('autofill-preview-section');
+  if (previewSection) previewSection.style.display = 'none';
+
   // ── Step 1a: PING — verify content script is reachable before proceeding ───
   try {
     const ping = await sendMessage('PING_CONTENT');
@@ -1040,8 +1054,8 @@ async function loadAutofillTab() {
     await previewMatch();
   } else {
     console.log('[Fillosophy] Using cached mapping — last match was < 60 s ago.');
-    // Still re-enable the button with the cached mapping
-    if (autofillBtn) autofillBtn.disabled = false;
+    renderMatchPreviewInPopup();
+    wireAutofillButton();
   }
 }
 
@@ -1089,6 +1103,7 @@ async function previewMatch() {
       if (autofillBtn) autofillBtn.disabled = false;
 
       console.log('[Fillosophy] Full template match — AI skipped.');
+      renderMatchPreviewInPopup();
       wireAutofillButton();
       return;
     }
@@ -1149,7 +1164,7 @@ async function previewMatch() {
 
     console.log('[Fillosophy] Match preview complete. Mapping ready.');
 
-    // ── Wire autofill button ────────────────────────────────────────────────
+    renderMatchPreviewInPopup();
     wireAutofillButton();
 
   } catch (err) {
@@ -1313,4 +1328,58 @@ function setLoadingState(btn, labelEl, isLoading) {
   if (labelEl) labelEl.textContent  = isLoading ? 'Extracting…' : 'Extract & Save Profile';
   // Only force-disable on entry; re-enable decisions are made by the caller
   if (isLoading) btn.disabled = true;
+}
+
+/**
+ * Builds and renders the dynamic list of matched field values and confidence scores
+ * directly inside the Autofill panel of the extension popup.
+ */
+function renderMatchPreviewInPopup() {
+  const previewSection = document.getElementById('autofill-preview-section');
+  const previewList = document.getElementById('autofill-preview-list');
+  if (!previewSection || !previewList) return;
+
+  previewList.innerHTML = '';
+
+  const entries = Object.entries(fieldMapping);
+  if (entries.length === 0) {
+    previewSection.style.display = 'none';
+    return;
+  }
+
+  previewSection.style.display = 'block';
+
+  entries.forEach(([label, data]) => {
+    // Create card container
+    const card = document.createElement('div');
+    card.className = 'autofill-preview-card';
+
+    // Header with label and badge
+    const header = document.createElement('div');
+    header.className = 'autofill-preview-header';
+
+    const nameSpan = document.createElement('span');
+    nameSpan.className = 'autofill-preview-name';
+    nameSpan.textContent = label;
+
+    const badge = document.createElement('span');
+    const isLow = (data.confidence ?? 0) < 70;
+    badge.className = 'autofill-preview-badge ' + (isLow ? 'badge-low' : 'badge-high');
+    badge.textContent = `${data.confidence ?? 0}%`;
+
+    header.appendChild(nameSpan);
+    header.appendChild(badge);
+
+    // Value
+    const valDiv = document.createElement('div');
+    valDiv.className = 'autofill-preview-val';
+    valDiv.textContent = data.value !== null ? data.value : '— (No Match)';
+    if (data.value === null) {
+      valDiv.style.opacity = '0.5';
+    }
+
+    card.appendChild(header);
+    card.appendChild(valDiv);
+    previewList.appendChild(card);
+  });
 }

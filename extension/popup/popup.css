@@ -710,3 +710,54 @@ body {
   font-size: 10.5px;
   color: var(--dark-navy-80);
 }
+
+/* Autofill Preview inside Popup */
+.autofill-preview-card {
+  display: flex;
+  flex-direction: column;
+  background: #F7F9EF;
+  border-radius: var(--radius-sm);
+  padding: 6px 10px;
+  border: var(--border-thin);
+  gap: 2px;
+}
+
+.autofill-preview-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.autofill-preview-name {
+  font-weight: 700;
+  font-size: 10.5px;
+  color: var(--dark-navy-80);
+}
+
+.autofill-preview-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 4px;
+  border-radius: 4px;
+  text-align: center;
+}
+
+.badge-high {
+  background: var(--lime-green);
+  color: var(--dark-navy);
+}
+
+.badge-low {
+  background: #FFEBEB;
+  color: #C53030;
+  border: 1px solid rgba(197, 48, 48, 0.3);
+}
+
+.autofill-preview-val {
+  font-size: 11.5px;
+  color: var(--dark-navy);
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

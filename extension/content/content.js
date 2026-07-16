@@ -581,7 +581,8 @@
     // Use capture so even clicks inside form elements fire this
     document.addEventListener('click', clickHandler, { capture: true, once: true });
 
-    renderOverlay(summary);
+    // Disable injecting overlay popups into host webpage DOM
+    // renderOverlay(summary);
     return summary;
   }
 
