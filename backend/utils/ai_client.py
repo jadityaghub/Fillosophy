@@ -196,6 +196,8 @@ _MOCK_PROFILE: dict = {
     "email":           "alex.carter@example.com",
     "phone":           "+1-555-019-8472",
     "address":         "San Francisco, CA, USA",
+    "date_of_birth":   "2002-05-15",
+    "gender":          "Male",
     "degree":          "B.Tech Computer Science",
     "institution":     "Mock University of Technology",
     "cgpa":            9.2,
@@ -317,6 +319,8 @@ return a JSON object with exactly these keys:
   "email": string or null,
   "phone": string or null,
   "address": string or null,
+  "date_of_birth": string or null (YYYY-MM-DD format, extract from DOB, birth date, age, etc.),
+  "gender": string or null (e.g., "Male", "Female", "Other"),
   "degree": string or null,
   "institution": string or null,
   "cgpa": number or null,
@@ -390,6 +394,13 @@ Rules:
     "Branch", "Department", "Program", "Course"    → profile.degree
     "College", "University", "Institution"         → profile.institution
     "Passing Year", "Year of Graduation"           → profile.graduation_year
+    "Date of Birth", "DOB", "Birthday", "Birth Date" → profile.date_of_birth (in YYYY-MM-DD format)
+    "Gender", "Sex"                                → profile.gender
+- DERIVED FIELDS — you MUST compute these from the profile when asked:
+    "Age" → calculate from profile.date_of_birth and today's date. Return the integer age.
+    "First Name" → extract from profile.full_name (first word).
+    "Last Name", "Surname" → extract from profile.full_name (last word).
+    "City", "State", "Country" → extract from profile.address if possible.
 - For checkboxes requiring confirmation or consent (e.g. "I confirm...", "I agree..."), return true or "yes" with high confidence.
 - If a field is clearly asking for a date (e.g. "Available From", "Start Date"), return the value strictly in YYYY-MM-DD format.
 """
