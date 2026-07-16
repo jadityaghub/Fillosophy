@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import time
+import datetime
 import httpx
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
@@ -224,9 +225,17 @@ _MOCK_PROFILE: dict = {
 
 def _mock_match(field_labels: list[str]) -> dict:
     """Return a plausible fake match result for every field label."""
+    # Calculate mock age dynamically based on today's date and mock DOB "2002-05-15"
+    dob = datetime.date(2002, 5, 15)
+    today = datetime.date.today()
+    mock_age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+
     mapping = {
         "full name":          (_MOCK_PROFILE["full_name"],       98),
         "name":               (_MOCK_PROFILE["full_name"],       97),
+        "first name":         ("Alex",                          95),
+        "last name":          ("Carter",                        95),
+        "surname":            ("Carter",                        95),
         "email":              (_MOCK_PROFILE["email"],           97),
         "email address":      (_MOCK_PROFILE["email"],           97),
         "phone":              (_MOCK_PROFILE["phone"],           95),
@@ -251,6 +260,16 @@ def _mock_match(field_labels: list[str]) -> dict:
         "passing year":       (_MOCK_PROFILE["graduation_year"], 92),
         "year of graduation": (_MOCK_PROFILE["graduation_year"], 92),
         "address":            (_MOCK_PROFILE["address"],         88),
+        "city":               ("San Francisco",                 90),
+        "state":              ("California",                    90),
+        "country":            ("USA",                           90),
+        "date of birth":      (_MOCK_PROFILE["date_of_birth"],   98),
+        "dob":                (_MOCK_PROFILE["date_of_birth"],   98),
+        "birthday":           (_MOCK_PROFILE["date_of_birth"],   98),
+        "birth date":         (_MOCK_PROFILE["date_of_birth"],   98),
+        "gender":             (_MOCK_PROFILE["gender"],          98),
+        "sex":                (_MOCK_PROFILE["gender"],          98),
+        "age":                (mock_age,                        98),
     }
     result = {}
     for label in field_labels:
@@ -397,7 +416,7 @@ Rules:
     "Date of Birth", "DOB", "Birthday", "Birth Date" → profile.date_of_birth (in YYYY-MM-DD format)
     "Gender", "Sex"                                → profile.gender
 - DERIVED FIELDS — you MUST compute these from the profile when asked:
-    "Age" → calculate from profile.date_of_birth and today's date. Return the integer age.
+    "Age" → calculate from profile.date_of_birth and the current date (which is {today_date}). Return the integer age.
     "First Name" → extract from profile.full_name (first word).
     "Last Name", "Surname" → extract from profile.full_name (last word).
     "City", "State", "Country" → extract from profile.address if possible.
@@ -456,7 +475,9 @@ Example:
 """
 
     try:
-        raw_response = _get_completion(_MATCHING_SYSTEM_PROMPT, user_message, "field matching")
+        today_date = datetime.date.today().isoformat()
+        system_prompt = _MATCHING_SYSTEM_PROMPT.format(today_date=today_date)
+        raw_response = _get_completion(system_prompt, user_message, "field matching")
     except Exception:
         print(f"{LOG_PREFIX} MOCK — match_fields_to_profile (fallback triggered).")
         return _mock_match(field_labels)
