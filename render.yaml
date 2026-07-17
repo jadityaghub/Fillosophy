@@ -12,10 +12,6 @@ services:
       - key: DEFAULT_PROVIDER
         value: "groq"
       - key: ANTHROPIC_API_KEY
-        sync: true # User must input this in the Render UI
+        sync: false # Set manually in Render dashboard
       - key: GROQ_API_KEY
-        sync: true # User must input this in the Render UI
-    disk:
-      name: sqlite-db-volume
-      mountPath: /data
-      sizeGB: 1
+        sync: false # Set manually in Render dashboard
