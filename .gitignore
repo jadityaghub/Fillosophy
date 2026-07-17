@@ -31,3 +31,7 @@ Thumbs.db
 
 # Environment variables
 .env
+
+# Extension packaging build artifacts
+extension/fillosophy-extension.zip
+extension/fillosophy-packaged/
