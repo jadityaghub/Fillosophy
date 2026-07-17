@@ -3,8 +3,8 @@ services:
   - type: web
     name: fillosophy-backend
     env: docker
-    dockerfilePath: Dockerfile
-    dockerContext: .
+    dockerfilePath: backend/Dockerfile
+    dockerContext: backend
     plan: free
     envVars:
       - key: MOCK_AI
