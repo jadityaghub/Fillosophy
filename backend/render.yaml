@@ -1,0 +1,21 @@
+# Render Blueprint Specification for Fillosophy Backend
+services:
+  - type: web
+    name: fillosophy-backend
+    env: docker
+    dockerfilePath: Dockerfile
+    dockerContext: .
+    plan: free
+    envVars:
+      - key: MOCK_AI
+        value: "false"
+      - key: DEFAULT_PROVIDER
+        value: "groq"
+      - key: ANTHROPIC_API_KEY
+        sync: true # User must input this in the Render UI
+      - key: GROQ_API_KEY
+        sync: true # User must input this in the Render UI
+    disk:
+      name: sqlite-db-volume
+      mountPath: /data
+      sizeGB: 1
