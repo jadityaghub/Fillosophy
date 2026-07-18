@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Fillosophy",
+  "name": "Fillosophy: AI Form Autofill & Resume Filler",
   "version": "1.0",
   "description": "AI-powered resume-based smart form autofill tool.",
   "permissions": [
@@ -15,7 +15,7 @@
   ],
   "action": {
     "default_popup": "popup/popup.html",
-    "default_title": "Fillosophy",
+    "default_title": "Fillosophy: AI Form Autofill & Resume Filler",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",
