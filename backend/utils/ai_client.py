@@ -305,6 +305,15 @@ Rules:
 - For experience and projects, return a list of objects.
 - CGPA: extract the numeric value only (e.g. 8.5, not "8.5/10").
 - graduation_year: extract as a 4-digit integer (e.g. 2026).
+- For phone numbers: return a structured object (not a plain string):
+    {{
+      "full": "+91 6238272532",
+      "country_code": "+91",
+      "country_code_numeric": "91",
+      "number_only": "6238272532"
+    }}
+  If no country code is present in the resume, default to +91 (India).
+  Always strip spaces from number_only (digits only, no spaces or dashes).
 """
 
 
@@ -336,7 +345,12 @@ return a JSON object with exactly these keys:
   "full_name": string or null,
   "preferred_name": string or null (e.g., from 'Commonly known as', 'Nickname', etc.),
   "email": string or null,
-  "phone": string or null,
+  "phone": {{
+    "full": "<country_code> <number>",
+    "country_code": "<+XX>",
+    "country_code_numeric": "<digits only>",
+    "number_only": "<digits only, no country code>"
+  }} or null,
   "address": string or null,
   "date_of_birth": string or null (YYYY-MM-DD format, extract from DOB, birth date, age, etc.),
   "gender": string or null (e.g., "Male", "Female", "Other"),
@@ -409,12 +423,20 @@ Rules:
     "Academic Score", "GPA", "CGPA", "Percentage" → profile.cgpa
     "Full Name", "Applicant Name", "Your Name"     → profile.full_name
     "Preferred Name", "Nickname", "Known As"       → profile.preferred_name
-    "Contact", "Mobile", "Phone Number"            → profile.phone
+    "Contact", "Mobile", "Phone Number", "Phone"   → profile.phone (see phone rules below)
     "Branch", "Department", "Program", "Course"    → profile.degree
     "College", "University", "Institution"         → profile.institution
     "Passing Year", "Year of Graduation"           → profile.graduation_year
     "Date of Birth", "DOB", "Birthday", "Birth Date" → profile.date_of_birth (in YYYY-MM-DD format)
     "Gender", "Sex"                                → profile.gender
+- PHONE FIELD RULES — profile.phone is now a structured object:
+    {{ "full": "+91 6238272532", "country_code": "+91", "country_code_numeric": "91", "number_only": "6238272532" }}
+    For fields labelled "Phone", "Mobile", "Phone number", "Contact number", "WhatsApp":
+      → Return profile.phone.number_only (digits only, e.g. "6238272532")
+      → This avoids duplication when the form has a separate country code selector.
+    For fields labelled "Phone with country code", "Full phone", "International phone":
+      → Return profile.phone.full (e.g. "+91 6238272532")
+    If profile.phone is a plain string (legacy), return it as-is.
 - DERIVED FIELDS — you MUST compute these from the profile when asked:
     "Age" → calculate from profile.date_of_birth and the current date (which is {today_date}). Return the integer age.
     "First Name" → extract from profile.full_name (first word).
@@ -423,6 +445,7 @@ Rules:
 - For checkboxes requiring confirmation or consent (e.g. "I confirm...", "I agree..."), return true or "yes" with high confidence.
 - If a field is clearly asking for a date (e.g. "Available From", "Start Date"), return the value strictly in YYYY-MM-DD format.
 """
+
 
 
 def match_fields_to_profile(profile: dict, field_labels: list[str]) -> dict:

@@ -47,12 +47,26 @@
   })();
 
   // ════════════════════════════════════════════════════════════
+  // GOOGLE FORMS DETECTION
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * Returns true if the current page is a Google Form (viewer or editor).
+   * @returns {boolean}
+   */
+  function isGoogleForms() {
+    return window.location.hostname === 'docs.google.com' &&
+           window.location.pathname.includes('/forms/');
+  }
+
+  // ════════════════════════════════════════════════════════════
   // LABEL RESOLUTION
   // ════════════════════════════════════════════════════════════
 
   /**
    * Resolves the human-readable label for a form element.
-   * Tries five strategies in order and returns the first non-empty result.
+   * Tries six strategies in order and returns the first non-empty result.
+   * Strategy 6 handles Google Forms' non-standard DOM.
    *
    * @param {HTMLElement} element
    * @returns {string|null}
@@ -87,11 +101,12 @@
     // Strategy 4 — aria-labelledby attribute
     const labelledBy = element.getAttribute('aria-labelledby');
     if (labelledBy) {
-      const referred = document.getElementById(labelledBy);
-      if (referred) {
-        const text = referred.innerText.trim();
-        if (text) return text;
-      }
+      // aria-labelledby can be a space-separated list of IDs
+      const ids = labelledBy.trim().split(/\s+/);
+      const parts = ids
+        .map((id) => document.getElementById(id)?.innerText?.trim())
+        .filter(Boolean);
+      if (parts.length) return parts.join(' ');
     }
 
     // Strategy 5 — Closest ancestor whose className contains a label-like word
@@ -104,6 +119,27 @@
         if (text) return text;
       }
       ancestor = ancestor.parentElement;
+    }
+
+    // Strategy 6 — Google Forms specific: walk up to find the question title.
+    // GForms renders question text in .freebirdFormviewerComponentsQuestionBaseTitle
+    // or inside the nearest ancestor that has [data-params], then grabs its first span.
+    if (isGoogleForms()) {
+      // Try GForms question title class (stable across recent versions)
+      const questionBlock = element.closest('[data-params], .freebirdFormviewerViewItemsItemItem');
+      if (questionBlock) {
+        const titleEl =
+          questionBlock.querySelector('.freebirdFormviewerComponentsQuestionBaseTitle') ||
+          questionBlock.querySelector('[role="heading"]') ||
+          questionBlock.querySelector('span[dir]');
+        if (titleEl) {
+          const text = titleEl.innerText.trim();
+          if (text) return text;
+        }
+      }
+      // Fallback: use aria-label on the input itself (GForms often sets this)
+      const ariaLabel = element.getAttribute('aria-label');
+      if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
     }
 
     return null;
@@ -120,11 +156,12 @@
    */
   function isVisible(el) {
     const style = window.getComputedStyle(el);
-    return (
-      style.display    !== 'none'   &&
-      style.visibility !== 'hidden' &&
-      el.offsetParent  !== null
-    );
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    // offsetParent is null for fixed/absolute positioned elements and on Google Forms.
+    // Fall back to bounding rect height as a more reliable visibility check.
+    if (el.offsetParent !== null) return true;
+    const rect = el.getBoundingClientRect();
+    return rect.width > 0 || rect.height > 0;
   }
 
   /**
@@ -134,6 +171,15 @@
    * @returns {Object[]} Array of field descriptor objects.
    */
   function detectFormFields() {
+    // Google Forms uses a completely custom DOM — try the specialised detector first.
+    if (isGoogleForms()) {
+      const gformsFields = detectGoogleFormFields();
+      if (gformsFields.length > 0) return gformsFields;
+      // Fall through to standard detection if GForms detector found nothing
+      // (e.g. form not fully loaded, or unusual structure).
+      console.warn('[Fillosophy Content] GForms detector found 0 fields — falling back to standard detection.');
+    }
+
     // Step 1 — Query all interactive elements (excludes hidden/submit/button/reset/image/file)
     const elements = document.querySelectorAll(
       'input:not([type="hidden"]):not([type="submit"]):not([type="button"])' +
@@ -417,19 +463,18 @@
    * @returns {Object} Autofill summary.
    */
   function applyAutofill(mapping, fieldDescriptors) {
-    const elements = document.querySelectorAll(
+    // ── Build label → descriptor map (supports both standard and GForms descriptors) ──
+    const labelToDescriptorMap = {};
+
+    // For standard (non-GForms) pages we also need the element NodeList to resolve by index
+    const standardElements = isGoogleForms() ? [] : Array.from(document.querySelectorAll(
       'input:not([type="hidden"]):not([type="submit"]):not([type="button"])' +
       ':not([type="reset"]):not([type="image"]):not([type="file"]),' +
       'select, textarea'
-    );
+    ));
 
-    const labelToElementMap = {};
     for (const descriptor of fieldDescriptors) {
-      const el = elements[descriptor.index];
-      if (!el) continue;
-
       // MUST use the exact same priority as collectFieldLabels() in popup.js
-      // so that mapping keys from /match line up with the right elements.
       let label =
         descriptor.label       ??
         descriptor.placeholder ??
@@ -438,47 +483,56 @@
         descriptor.id          ??
         `field_${descriptor.index}`;
 
-      // Deduplicate: if this label already exists in the map, append
-      // the field index to make it unique. This must match the same
-      // deduplication logic in the DETECT_FIELDS handler.
-      if (label in labelToElementMap) {
+      if (label in labelToDescriptorMap) {
         label = `${label} (${descriptor.index})`;
       }
 
-      labelToElementMap[label] = el;
+      labelToDescriptorMap[label] = descriptor;
     }
 
     // Debug — surface the map so mismatches can be spotted in DevTools
-    console.log('[Fillosophy Content] labelToElementMap keys:', Object.keys(labelToElementMap));
+    console.log('[Fillosophy Content] labelToDescriptorMap keys:', Object.keys(labelToDescriptorMap));
     console.log('[Fillosophy Content] mapping keys:', Object.keys(mapping));
 
     const results = [];
     const summary = { filled: 0, flagged: 0, skipped: 0, details: [] };
 
     for (const [label, fieldData] of Object.entries(mapping)) {
-      const element = labelToElementMap[label];
+      const descriptor = labelToDescriptorMap[label];
+      if (!descriptor || fieldData.value == null) continue;
 
-      if (!element || fieldData.value == null || element.disabled || element.readOnly) {
+      let status = 'filled';
+
+      // ── Google Forms path ────────────────────────────────────────────────
+      if (descriptor._gforms) {
+        const ok = fillGoogleFormField(descriptor, String(fieldData.value));
+        if (!ok) status = 'skipped';
+        const resObj = { label, status, confidence: fieldData.confidence, value: fieldData.value };
+        results.push(resObj);
+        if (status === 'filled') summary.filled++;
+        else summary.skipped++;
         continue;
       }
 
-      let status = "filled";
+      // ── Standard DOM path ────────────────────────────────────────────────
+      const element = standardElements[descriptor.index];
+      if (!element || element.disabled || element.readOnly) continue;
 
       if (fieldData.confidence < 70) {
-        element.setAttribute("data-fillosophy-flag", "low-confidence");
-        element.style.border = "2px solid #D97706";
-        element.style.backgroundColor = "#FEF3C7";
-        status = "low_confidence";
+        element.setAttribute('data-fillosophy-flag', 'low-confidence');
+        element.style.border = '2px solid #D97706';
+        element.style.backgroundColor = '#FEF3C7';
+        status = 'low_confidence';
       }
 
       const tagName = element.tagName.toLowerCase();
-      const type = (element.type || "").toLowerCase();
+      const type = (element.type || '').toLowerCase();
 
       try {
         if (tagName === 'input' && (type === 'checkbox' || type === 'radio')) {
           if (type === 'checkbox') {
             const valStr = String(fieldData.value).toLowerCase();
-            element.checked = ["yes", "true", "1"].includes(valStr) || fieldData.value === true;
+            element.checked = ['yes', 'true', '1'].includes(valStr) || fieldData.value === true;
             element.dispatchEvent(new Event('change', { bubbles: true }));
           } else if (type === 'radio') {
             const radios = document.querySelectorAll(`input[type="radio"][name="${element.name}"]`);
@@ -491,7 +545,7 @@
                 break;
               }
             }
-            if (!matched) status = "skipped";
+            if (!matched) status = 'skipped';
           }
         } else if (tagName === 'select') {
           let matched = false;
@@ -500,31 +554,29 @@
           for (let i = 0; i < options.length; i++) {
             const optVal = options[i].value.toLowerCase();
             const optText = options[i].text.toLowerCase();
-            if (!optVal) continue; // Skip default empty options like "Select a degree"
-
-            if (optVal === targetValue || 
-                optText === targetValue || 
+            if (!optVal) continue;
+            if (optVal === targetValue ||
+                optText === targetValue ||
                 optText.includes(targetValue) ||
                 targetValue.includes(optVal) ||
                 targetValue.includes(optText) ||
-                // Basic degree fuzzy mapping
                 (targetValue.includes('b.tech') && optVal.includes('bachelor')) ||
-                (targetValue.includes('b.e') && optVal.includes('bachelor')) ||
-                (targetValue.includes('master') && optVal.includes('master')) ||
-                (targetValue.includes('phd') && optVal.includes('phd'))) {
+                (targetValue.includes('b.e')    && optVal.includes('bachelor')) ||
+                (targetValue.includes('master') && optVal.includes('master'))   ||
+                (targetValue.includes('phd')    && optVal.includes('phd'))) {
               element.value = options[i].value;
               element.dispatchEvent(new Event('change', { bubbles: true }));
               matched = true;
               break;
             }
           }
-          if (!matched) status = "skipped";
+          if (!matched) status = 'skipped';
         } else {
           fillField(element, String(fieldData.value));
         }
       } catch (err) {
         console.error(`[Fillosophy Content] Error filling ${label}:`, err);
-        status = "skipped";
+        status = 'skipped';
       }
 
       // ── Visual outline highlighting ──────────────────────────────────────
@@ -611,6 +663,506 @@
 
     field.dispatchEvent(new Event('input',  { bubbles: true }));
     field.dispatchEvent(new Event('change', { bubbles: true }));
+    field.dispatchEvent(new Event('blur',   { bubbles: true }));
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // PHONE NUMBER — CONTEXT DETECTION & SMART FILLING
+  // ════════════════════════════════════════════════════════════
+
+  /** Country-code patterns: +91, +1, +44 … */
+  const _CC_PATTERN = /^\+\d{1,3}$/;
+  /** Labels that imply the field wants ONLY the local number portion. */
+  const _NUMBER_ONLY_HINTS = ['mobile number', 'phone number', 'contact number', 'whatsapp', 'mobile no', 'phone no', 'enter number', 'enter mobile', 'your number'];
+  /** Labels that imply the field wants the full international format. */
+  const _FULL_PHONE_HINTS  = ['with country code', 'international', 'full phone', 'full number'];
+
+  /**
+   * Inspects the DOM context around a phone input to determine whether a
+   * separate country-code prefix exists nearby, and which phone format the
+   * field expects.
+   *
+   * @param {HTMLElement} element   - The phone input element.
+   * @returns {{ hasCountryCodePrefix: boolean, extractedCountryCode: string|null, expectedFormat: string }}
+   */
+  function detectPhoneNumberContext(element) {
+    let hasCountryCodePrefix = false;
+    let extractedCountryCode = null;
+    let expectedFormat = 'number_only'; // default: most phone fields want just the number
+
+    // ── Check 1: Inspect siblings & parent for a country-code selector ───────
+    const parent = element.parentElement;
+    const grandParent = parent?.parentElement;
+
+    const checkContainer = (container) => {
+      if (!container) return;
+      // Look for a <select> whose options contain country-code patterns
+      const selects = container.querySelectorAll('select');
+      for (const sel of selects) {
+        if (sel === element) continue;
+        const opts = Array.from(sel.options);
+        const hasCC = opts.some(o =>
+          _CC_PATTERN.test((o.value || '').trim()) ||
+          _CC_PATTERN.test((o.text  || '').trim().split(' ')[0])
+        );
+        if (hasCC) {
+          hasCountryCodePrefix = true;
+          // Try to read what's currently selected
+          const selectedText = sel.options[sel.selectedIndex]?.text?.trim() ?? '';
+          const ccMatch = selectedText.match(/\+\d{1,3}/);
+          if (ccMatch) extractedCountryCode = ccMatch[0];
+          return;
+        }
+        // A select whose placeholder/first option says "country code"
+        if (opts[0] && /country.?code|code/i.test(opts[0].text)) {
+          hasCountryCodePrefix = true;
+          return;
+        }
+      }
+
+      // Look for an <input> with a country-code placeholder or a static element showing "+XX"
+      const inputs = container.querySelectorAll('input');
+      for (const inp of inputs) {
+        if (inp === element) continue;
+        const ph = (inp.placeholder || '').toLowerCase();
+        if (ph.includes('country code') || ph.includes('code')) {
+          hasCountryCodePrefix = true;
+          return;
+        }
+        // Input whose current value IS a country code (e.g. "+91")
+        if (_CC_PATTERN.test((inp.value || '').trim())) {
+          hasCountryCodePrefix = true;
+          extractedCountryCode = inp.value.trim();
+          return;
+        }
+      }
+
+      // Look for any static text element displaying just a country code
+      const allText = Array.from(container.querySelectorAll('span, div, p, label, button'))
+        .map(el => el.innerText?.trim())
+        .filter(t => t && _CC_PATTERN.test(t));
+      if (allText.length) {
+        hasCountryCodePrefix = true;
+        extractedCountryCode = allText[0];
+      }
+    };
+
+    // Search in increasing radius: parent → grandparent → 3 levels up
+    let ancestor = element.parentElement;
+    for (let i = 0; i < 5 && ancestor && ancestor !== document.body; i++) {
+      checkContainer(ancestor);
+      if (hasCountryCodePrefix) break;
+      ancestor = ancestor.parentElement;
+    }
+
+    // ── Check 2: Label / placeholder hints ───────────────────────────────────
+    const label = (element.getAttribute('aria-label') || element.placeholder || '').toLowerCase();
+
+    if (_FULL_PHONE_HINTS.some(h => label.includes(h))) {
+      expectedFormat = 'with_country_code';
+      hasCountryCodePrefix = false; // doesn't need separate filling
+    } else if (hasCountryCodePrefix) {
+      expectedFormat = 'number_only';
+    } else if (_NUMBER_ONLY_HINTS.some(h => label.includes(h))) {
+      expectedFormat = 'number_only';
+    } else {
+      // Default: if the input type is "tel" and we see no CC prefix, return number_only
+      // to avoid duplicating any code the user may have manually typed
+      expectedFormat = (element.type === 'tel') ? 'number_only' : 'unknown';
+    }
+
+    return { hasCountryCodePrefix, extractedCountryCode, expectedFormat };
+  }
+
+  /**
+   * Finds a sibling country-code input or select relative to a phone field.
+   *
+   * @param {HTMLElement} phoneElement
+   * @returns {HTMLElement|null}
+   */
+  function findCountryCodeField(phoneElement) {
+    let ancestor = phoneElement.parentElement;
+    for (let i = 0; i < 6 && ancestor && ancestor !== document.body; i++) {
+      // Prefer a <select> with country-code options
+      const sel = Array.from(ancestor.querySelectorAll('select')).find(s => {
+        if (s === phoneElement) return false;
+        return Array.from(s.options).some(o =>
+          _CC_PATTERN.test((o.value || '').trim()) ||
+          _CC_PATTERN.test((o.text  || '').trim().split(' ')[0]) ||
+          /country.?code|code/i.test(o.text)
+        );
+      });
+      if (sel) { console.log('[Fillosophy] Country code field found:', sel); return sel; }
+
+      // Or an <input> flagged as country code
+      const inp = Array.from(ancestor.querySelectorAll('input')).find(inp => {
+        if (inp === phoneElement) return false;
+        const ph = (inp.placeholder || '').toLowerCase();
+        return ph.includes('country code') || ph.includes('code') ||
+               _CC_PATTERN.test((inp.value || '').trim());
+      });
+      if (inp) { console.log('[Fillosophy] Country code field found:', inp); return inp; }
+
+      ancestor = ancestor.parentElement;
+    }
+    return null;
+  }
+
+  /**
+   * Fills a country-code selector with the numeric code (e.g. "91").
+   *
+   * @param {HTMLElement} element              - The CC select or input.
+   * @param {string}      countryCodeNumeric   - Digits only, e.g. "91".
+   */
+  function fillCountryCodeField(element, countryCodeNumeric) {
+    if (!element || !countryCodeNumeric) return;
+
+    if (element.tagName === 'SELECT') {
+      const opts = Array.from(element.options);
+      const target = countryCodeNumeric.replace(/^\+/, '');
+      // Try matching option value or text that contains the numeric code
+      const match = opts.find(o =>
+        o.value === target || o.value === `+${target}` ||
+        o.text.includes(`+${target}`) || o.text.includes(target)
+      );
+      if (match) {
+        element.value = match.value;
+        element.dispatchEvent(new Event('change', { bubbles: true }));
+        console.log(`[Fillosophy] Country code set to: ${match.value}`);
+      }
+    } else if (element.tagName === 'INPUT') {
+      fillField(element, countryCodeNumeric);
+    }
+  }
+
+  /**
+   * Smart phone filling: chooses the right format (full / number_only) based
+   * on field context and also fills any sibling country-code selector.
+   *
+   * @param {HTMLElement} element      - The phone input element.
+   * @param {any}         phoneData    - profile.phone (object or string).
+   * @param {Object}      descriptor   - Field descriptor (for context hints).
+   * @returns {{ status: string, value: string|null }}
+   */
+  function fillPhoneNumberField(element, phoneData, descriptor) {
+    if (!phoneData) return { status: 'skipped', value: null };
+
+    // Normalise: handle both structured object and legacy plain string
+    let phoneObj;
+    if (typeof phoneData === 'object' && phoneData !== null && phoneData.number_only) {
+      phoneObj = phoneData;
+    } else {
+      // Legacy string — parse it on the fly
+      const str = String(phoneData).trim();
+      const ccMatch = str.match(/^(\+\d{1,3})\s*(.*)/);
+      if (ccMatch) {
+        phoneObj = {
+          full: str,
+          country_code: ccMatch[1],
+          country_code_numeric: ccMatch[1].replace('+', ''),
+          number_only: ccMatch[2].replace(/\D/g, ''),
+        };
+      } else {
+        phoneObj = { full: str, country_code: '+91', country_code_numeric: '91', number_only: str.replace(/\D/g, '') };
+      }
+    }
+
+    const context = detectPhoneNumberContext(element);
+    let valueToFill;
+
+    if (context.expectedFormat === 'with_country_code') {
+      valueToFill = phoneObj.full;
+    } else {
+      // Default: fill number only, handle country code separately
+      valueToFill = phoneObj.number_only || phoneObj.full;
+
+      // If there's a separate CC field, fill it too
+      if (context.hasCountryCodePrefix) {
+        const ccField = findCountryCodeField(element);
+        if (ccField) {
+          fillCountryCodeField(ccField, phoneObj.country_code_numeric);
+        }
+      }
+    }
+
+    try {
+      fillField(element, valueToFill);
+      console.log(`[Fillosophy] Phone filled: "${valueToFill}" (format: ${context.expectedFormat})`);
+      return { status: 'filled', value: valueToFill };
+    } catch (err) {
+      console.error('[Fillosophy] Phone fill error:', err);
+      return { status: 'skipped', value: null };
+    }
+  }
+
+  /**
+   * Returns true if the field label or type indicates a phone number field.
+   * @param {string} label
+   * @param {string} type
+   * @returns {boolean}
+   */
+  function isPhoneField(label, type) {
+    if (type === 'tel') return true;
+    const l = (label || '').toLowerCase();
+    return l.includes('phone') || l.includes('mobile') ||
+           l.includes('contact number') || l.includes('whatsapp') ||
+           l.includes('cell');
+  }
+
+  // ════════════════════════════════════════════════════════════
+  // GOOGLE FORMS — SPECIALISED DETECTION & FILL
+  // ════════════════════════════════════════════════════════════
+
+  /**
+   * Detects all question blocks in a Google Form and returns field descriptors
+   * compatible with the standard detectFormFields() format.
+   *
+   * Google Forms does NOT use semantic <input name="..."> elements for all
+   * question types. The DOM structure is:
+   *
+   *   .freebirdFormviewerViewItemsItemItem   ← one per question
+   *     .freebirdFormviewerComponentsQuestionBaseTitle  ← question label
+   *     input[name^="entry."]  /  textarea[name^="entry."]  ← short answer / paragraph
+   *     div[role="radiogroup"] > div[role="radio"]          ← multiple choice
+   *     div[role="group"] > div[role="checkbox"]            ← checkboxes
+   *     div[role="listbox"]                                 ← dropdown
+   *
+   * @returns {Object[]} Array of field descriptor objects.
+   */
+  function detectGoogleFormFields() {
+    const fields = [];
+    let index = 0;
+
+    // ── Text inputs and textareas ──────────────────────────────────────────────
+    // Key insight: GForms sets aria-label on every question input to the question
+    // title. We use this as both the detector (must have aria-label to be a real
+    // question field, not a UI widget) and the label source.
+    // We do NOT rely solely on name^="entry." because in preview/edit modes GForms
+    // may render visible inputs without name attributes, or with hidden twins.
+    const allInputs = document.querySelectorAll(
+      'input:not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="reset"]):not([type="image"]):not([type="file"]), textarea'
+    );
+
+    allInputs.forEach((el) => {
+      if (!isVisible(el)) return;
+      const label = getGFormsLabel(el);
+      if (!label) return; // no label = not a GForms question input
+      fields.push({
+        index: index++,
+        tag: el.tagName,
+        type: el.tagName === 'TEXTAREA' ? 'textarea' : (el.type || 'text'),
+        name: el.name || null,
+        id: el.id || null,
+        placeholder: el.placeholder || null,
+        label,
+        ariaLabel: el.getAttribute('aria-label') || null,
+        required: el.required || false,
+        value: el.value || null,
+        _gforms: { kind: 'text', element: el },
+      });
+    });
+
+    // ── Multiple choice (radiogroup) ───────────────────────────────────────────
+    document.querySelectorAll('[role="radiogroup"]').forEach((rg) => {
+      const label = getGFormsLabel(rg);
+      if (!label) return;
+      const options = Array.from(rg.querySelectorAll('[role="radio"]'))
+        .map((r) => r.getAttribute('data-value') || r.innerText.trim())
+        .filter(Boolean);
+      if (!options.length) return;
+      fields.push({
+        index: index++,
+        tag: 'DIV', type: 'radio',
+        name: null, id: null, placeholder: null,
+        label,
+        ariaLabel: rg.getAttribute('aria-label') || label,
+        required: false, value: null,
+        _gforms: { kind: 'radio', container: rg, options },
+      });
+    });
+
+    baseIndex = fields.length;
+
+    // ── Strategy C: role="group" with checkboxes ──────────────────────────
+    document.querySelectorAll('[role="group"]').forEach((cg, i) => {
+      const checkboxes = cg.querySelectorAll('[role="checkbox"]');
+      if (!checkboxes.length) return;
+      const label = getGFormsLabel(cg);
+      if (!label) return;
+      const options = Array.from(checkboxes)
+        .map((c) => c.getAttribute('data-value') || c.innerText.trim())
+        .filter(Boolean);
+      fields.push({
+        index: baseIndex + i,
+        tag: 'DIV',
+        type: 'checkbox',
+        name: null, id: null, placeholder: null,
+        label,
+        ariaLabel: cg.getAttribute('aria-label') || label,
+        required: false, value: null,
+        _gforms: { kind: 'checkbox', container: cg, options },
+      });
+    });
+
+    baseIndex = fields.length;
+
+    // ── Strategy D: role="listbox" → dropdown ─────────────────────────────
+    document.querySelectorAll('[role="listbox"]').forEach((lb, i) => {
+      const label = getGFormsLabel(lb);
+      if (!label) return;
+      const options = Array.from(lb.querySelectorAll('[role="option"]'))
+        .map((o) => o.getAttribute('data-value') || o.innerText.trim())
+        .filter(Boolean);
+      fields.push({
+        index: baseIndex + i,
+        tag: 'DIV',
+        type: 'select',
+        name: null, id: null, placeholder: null,
+        label,
+        ariaLabel: lb.getAttribute('aria-label') || label,
+        required: false, value: null,
+        _gforms: { kind: 'listbox', element: lb, options },
+      });
+    });
+
+    console.log(`[Fillosophy Content] Google Forms: detected ${fields.length} question(s)`, fields.map(f => f.label));
+    return fields;
+  }
+
+  /**
+   * Resolves the label for a Google Forms element by walking up its DOM ancestors.
+   * Uses multiple strategies since GForms class names change across renderer versions.
+   *
+   * @param {HTMLElement} el
+   * @returns {string|null}
+   */
+  function getGFormsLabel(el) {
+    // Strategy 1 — aria-label directly on the element.
+    // GForms always sets aria-label on text inputs to the question title.
+    // We check this FIRST because it's clean (just the title, no description).
+    // aria-labelledby is checked second because it often joins title + description + "*".
+    const ariaLabel = el.getAttribute('aria-label');
+    if (ariaLabel && ariaLabel.trim()) {
+      // Strip trailing " *" that GForms appends to required question labels
+      return ariaLabel.trim().replace(/\s*\*\s*$/, '').trim();
+    }
+
+    // Strategy 2 — aria-labelledby: use ONLY THE FIRST referenced element.
+    // GForms sets aria-labelledby="title-id description-id required-id" — joining
+    // all of them gives "Full Name Some description here *" which is too long.
+    // Taking only the first ID gives just the question title.
+    const labelledBy = el.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      const firstId = labelledBy.trim().split(/\s+/)[0];
+      const titleEl = document.getElementById(firstId);
+      if (titleEl) {
+        const text = titleEl.innerText?.trim().replace(/\s*\*\s*$/, '').trim();
+        if (text && text.length > 0 && text.length < 150) return text;
+      }
+    }
+
+    // Strategy 3 — Walk up ancestors, checking DIRECT CHILDREN for a heading.
+    // Uses Array.from(children).find() NOT querySelector() to avoid picking up
+    // page-level headings from the full subtree search.
+    let ancestor = el.parentElement;
+    for (let depth = 0; depth < 12 && ancestor && ancestor !== document.body; depth++) {
+      const directHeading = Array.from(ancestor.children).find(
+        child =>
+          child.getAttribute('role') === 'heading' ||
+          /^H[1-6]$/.test(child.tagName)
+      );
+      if (directHeading) {
+        const text = directHeading.innerText.trim().replace(/\s*\*\s*$/, '').trim();
+        if (text && text.length > 0 && text.length < 150) return text;
+      }
+      ancestor = ancestor.parentElement;
+    }
+
+    return null;
+  }
+
+  /**
+   * Fills a single Google Forms field using the appropriate interaction method.
+   * GForms uses Angular internals that require InputEvent (not Event) for text,
+   * and real DOM clicks for radio/checkbox/dropdown.
+   *
+   * @param {Object} descriptor - Field descriptor from detectGoogleFormFields().
+   * @param {string} value      - Value to fill.
+   * @returns {boolean} True if successfully filled.
+   */
+  function fillGoogleFormField(descriptor, value) {
+    try {
+      const gf = descriptor._gforms;
+      if (!gf) return false;
+
+      if (gf.kind === 'text') {
+        const el = gf.element;
+        el.focus();
+        // Select all existing content and replace
+        el.select && el.select();
+        // Use execCommand as primary method — works reliably in GForms
+        document.execCommand('selectAll', false, null);
+        document.execCommand('insertText', false, value);
+        // Also set via native setter + InputEvent as fallback
+        const proto = el.tagName === 'TEXTAREA'
+          ? window.HTMLTextAreaElement.prototype
+          : window.HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        if (setter) setter.call(el, value);
+        el.dispatchEvent(new InputEvent('input', { bubbles: true, data: value, inputType: 'insertText' }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
+      }
+
+      if (gf.kind === 'radio') {
+        const target = String(value).toLowerCase();
+        const radios = gf.container.querySelectorAll('[role="radio"]');
+        for (const radio of radios) {
+          const optVal = (radio.getAttribute('data-value') || radio.innerText).toLowerCase().trim();
+          if (optVal === target || optVal.includes(target) || target.includes(optVal)) {
+            radio.click();
+            return true;
+          }
+        }
+        return false;
+      }
+
+      if (gf.kind === 'checkbox') {
+        const targets = String(value).toLowerCase().split(/[,;]/).map((s) => s.trim());
+        const checkboxes = gf.container.querySelectorAll('[role="checkbox"]');
+        let filled = false;
+        for (const cb of checkboxes) {
+          const optVal = (cb.getAttribute('data-value') || cb.innerText).toLowerCase().trim();
+          const shouldCheck = targets.some(
+            (t) => t === optVal || t.includes(optVal) || optVal.includes(t)
+          );
+          const isChecked = cb.getAttribute('aria-checked') === 'true';
+          if (shouldCheck && !isChecked) { cb.click(); filled = true; }
+        }
+        return filled;
+      }
+
+      if (gf.kind === 'listbox') {
+        // Open the dropdown
+        gf.element.click();
+        const target = String(value).toLowerCase();
+        // Wait a tick for options to render, then click the matching option
+        setTimeout(() => {
+          const options = document.querySelectorAll('[role="option"]');
+          for (const opt of options) {
+            const optText = (opt.getAttribute('data-value') || opt.innerText).toLowerCase().trim();
+            if (optText === target || optText.includes(target) || target.includes(optText)) {
+              opt.click();
+              return;
+            }
+          }
+        }, 150);
+        return true;
+      }
+    } catch (err) {
+      console.error('[Fillosophy Content] fillGoogleFormField error:', err);
+    }
+    return false;
   }
 
   // ════════════════════════════════════════════════════════════

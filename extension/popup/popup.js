@@ -229,6 +229,9 @@ function switchTab(tabId) {
     }
   });
 
+  const appContainer = document.getElementById('app');
+  if (appContainer) appContainer.scrollTop = 0;
+
   const label = tabId.charAt(0).toUpperCase() + tabId.slice(1);
   console.log(`[Fillosophy] Tab switched to: ${label}`);
 
@@ -1235,7 +1238,10 @@ function wireAutofillButton() {
       // Status message
       const st2 = getStatus();
       if (st2) {
-        if (flagged > 0) {
+        if (filled === 0 && flagged === 0) {
+          st2.textContent = `⚠ No fields could be matched to your profile. Try re-scanning or check your profile.`;
+          st2.className   = 'upload-status amber';
+        } else if (flagged > 0) {
           st2.textContent = `✓ Filled ${filled} field(s). ${flagged} flagged for your review on the page.`;
           st2.className   = 'upload-status amber';
         } else {

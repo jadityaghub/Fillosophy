@@ -34,4 +34,5 @@ Thumbs.db
 
 # Extension packaging build artifacts
 extension/fillosophy-extension.zip
+extension/fillosophy-packaged.zip
 extension/fillosophy-packaged/
