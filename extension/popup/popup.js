@@ -116,6 +116,21 @@ let lastMatchTimestamp = null;
  */
 let currentPageUrl = null;
 
+/**
+ * Logs current profile and field mapping cache state for debugging.
+ */
+function logProfileState() {
+  console.log(`
+  [Fillosophy Debug] Profile State:
+  ├─ Current Profile Name: ${currentProfileName}
+  ├─ Current Profile Data: ${currentProfile ? 'loaded' : 'empty'}
+  ├─ Last Upload: ${lastUploadTimestamp ? new Date(lastUploadTimestamp).toISOString() : 'never'}
+  ├─ Field Matching Cached: ${fieldMatchingCacheTimestamp ? new Date(fieldMatchingCacheTimestamp).toISOString() : 'never'}
+  ├─ Cache is Stale: ${fieldMatchingCacheTimestamp && lastUploadTimestamp ? lastUploadTimestamp > fieldMatchingCacheTimestamp : 'N/A'}
+  └─ Field Mapping Keys: ${Object.keys(fieldMapping || {}).length}
+  `);
+}
+
 // ════════════════════════════════════════════════════════════
 // INITIALISATION
 // ════════════════════════════════════════════════════════════
