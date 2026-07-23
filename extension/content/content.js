@@ -194,7 +194,10 @@
       if (!isVisible(element)) return;
 
       // Step 2 — Build descriptor object
-      const phoneContext = detectPhoneNumberContext(element);
+      const label = getLabelText(element);
+      const isPhone = isPhoneField(label, element.type);
+      const phoneContext = isPhone ? detectPhoneNumberContext(element) : { hasCountryCodePrefix: false, extractedCountryCode: null, expectedFormat: 'unknown' };
+
       const descriptor = {
         index:       i,
         tag:         element.tagName,
@@ -202,7 +205,7 @@
         name:        element.name        || null,
         id:          element.id          || null,
         placeholder: element.placeholder || null,
-        label:       getLabelText(element),
+        label:       label,
         ariaLabel:   element.getAttribute('aria-label') ?? null,
         required:    element.required    ?? false,
         value:       element.value       ?? null,
@@ -575,7 +578,7 @@
             }
           }
           if (!matched) status = 'skipped';
-        } else if (isPhoneField(label, type) || descriptor.expectedFormat === 'number_only') {
+        } else if (isPhoneField(label, type)) {
           const phoneRes = fillPhoneNumberField(element, fieldData.value, descriptor);
           if (phoneRes.status === 'skipped') status = 'skipped';
         } else {
@@ -789,24 +792,29 @@
    */
   function findCountryCodeField(phoneElement) {
     let ancestor = phoneElement.parentElement;
-    for (let i = 0; i < 6 && ancestor && ancestor !== document.body; i++) {
+    for (let i = 0; i < 2 && ancestor && ancestor !== document.body; i++) {
       // Prefer a <select> with country-code options
       const sel = Array.from(ancestor.querySelectorAll('select')).find(s => {
         if (s === phoneElement) return false;
         return Array.from(s.options).some(o =>
           _CC_PATTERN.test((o.value || '').trim()) ||
           _CC_PATTERN.test((o.text  || '').trim().split(' ')[0]) ||
-          /country.?code|code/i.test(o.text)
+          /country.?code|dial.?code|calling.?code/i.test(o.text)
         );
       });
       if (sel) { console.log('[Fillosophy] Country code field found:', sel); return sel; }
 
-      // Or an <input> flagged as country code
+      // Or an <input> flagged strictly as country/dial code
       const inp = Array.from(ancestor.querySelectorAll('input')).find(inp => {
         if (inp === phoneElement) return false;
+        const type = (inp.type || '').toLowerCase();
+        if (type === 'email' || type === 'password' || type === 'hidden') return false;
         const ph = (inp.placeholder || '').toLowerCase();
-        return ph.includes('country code') || ph.includes('code') ||
-               _CC_PATTERN.test((inp.value || '').trim());
+        const name = (inp.name || '').toLowerCase();
+        const isCC = ph.includes('country code') || ph.includes('dial code') || ph.includes('calling code') ||
+                     name.includes('country_code') || name.includes('dial_code') ||
+                     _CC_PATTERN.test((inp.value || '').trim());
+        return isCC;
       });
       if (inp) { console.log('[Fillosophy] Country code field found:', inp); return inp; }
 
@@ -853,6 +861,12 @@
    */
   function fillPhoneNumberField(element, phoneData, descriptor) {
     if (!phoneData) return { status: 'skipped', value: null };
+
+    // Guard: if value is an email address or string with letters, fill directly as text
+    if (typeof phoneData === 'string' && (phoneData.includes('@') || /[a-zA-Z]/.test(phoneData))) {
+      fillField(element, phoneData);
+      return { status: 'filled', value: phoneData };
+    }
 
     // Normalise: handle both structured object and legacy plain string
     let phoneObj;
