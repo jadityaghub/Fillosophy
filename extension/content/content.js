@@ -194,6 +194,7 @@
       if (!isVisible(element)) return;
 
       // Step 2 — Build descriptor object
+      const phoneContext = detectPhoneNumberContext(element);
       const descriptor = {
         index:       i,
         tag:         element.tagName,
@@ -205,6 +206,9 @@
         ariaLabel:   element.getAttribute('aria-label') ?? null,
         required:    element.required    ?? false,
         value:       element.value       ?? null,
+        hasCountryCodePrefix: phoneContext.hasCountryCodePrefix,
+        countryCodeValue: phoneContext.extractedCountryCode,
+        expectedFormat: phoneContext.expectedFormat
       };
       Object.defineProperty(descriptor, 'element', { value: element, enumerable: false });
 
@@ -571,6 +575,9 @@
             }
           }
           if (!matched) status = 'skipped';
+        } else if (isPhoneField(label, type) || descriptor.expectedFormat === 'number_only') {
+          const phoneRes = fillPhoneNumberField(element, fieldData.value, descriptor);
+          if (phoneRes.status === 'skipped') status = 'skipped';
         } else {
           fillField(element, String(fieldData.value));
         }

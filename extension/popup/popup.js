@@ -68,6 +68,9 @@ let selectedFile = null;
  * @type {Object|null}
  */
 let currentProfile = null;
+let currentProfileName = null;
+let lastUploadTimestamp = null;
+let fieldMatchingCacheTimestamp = null;
 
 /**
  * Module-level maps so switchTab() can be called from anywhere in the file
@@ -644,8 +647,19 @@ async function handleExtract(els) {
     const data = await response.json();
     console.log('[Fillosophy Upload] Extract success:', data);
 
-    // ── Store and display the profile ───────────────────────────────────────
     currentProfile = data.profile;
+    currentProfileName = profileName;
+    lastUploadTimestamp = Date.now();
+
+    // CRITICAL: Clear the field matching cache
+    fieldMatchingCacheTimestamp = null;
+    fieldMapping = {};
+    lastMatchTimestamp = null;
+
+    console.log(`[Fillosophy] Cache invalidated at ${lastUploadTimestamp}`);
+    console.log(`[Fillosophy] New profile loaded: ${currentProfileName}`);
+    logProfileState();
+
     displayProfile(data.profile);
 
     // ── Persist to chrome.storage ───────────────────────────────────────────
@@ -907,8 +921,6 @@ function displayProfile(profile) {
   const set = (id, value) => {
     const el = document.getElementById(id);
     if (!el) return;
-    // Show '—' for null, undefined, empty string, and the literal string "null"
-    // but preserve numeric 0 and other falsy-but-valid values
     if (value == null || value === '' || value === 'null') {
       el.value = '—';
     } else {
@@ -916,8 +928,13 @@ function displayProfile(profile) {
     }
   };
 
+  const phoneDisplay = (typeof profile.phone === 'object' && profile.phone !== null)
+    ? profile.phone.full
+    : profile.phone;
+
   set('profile-field-name',   profile.full_name ?? '—');
   set('profile-field-email',  profile.email     ?? '—');
+  set('profile-field-phone',  phoneDisplay      ?? '—');
   set('profile-field-cgpa',   profile.cgpa      ?? '—');
   set('profile-field-degree', profile.degree    ?? '—');
   set('profile-field-skills',
@@ -1003,6 +1020,7 @@ async function loadAutofillTab() {
       const name = profileRes.profileName ?? 'Unknown';
       if (activeProfileEl) activeProfileEl.textContent = name;
       currentProfile = profileRes.profile;
+      currentProfileName = name;
       console.log(`[Fillosophy] Active profile loaded: ${name}`);
     } else {
       if (activeProfileEl) activeProfileEl.textContent = 'None';
@@ -1024,6 +1042,32 @@ async function loadAutofillTab() {
     if (autofillBtn) autofillBtn.disabled = true;
     return;
   }
+
+  // Guard against stale profiles & invalidate cache if profile is newer
+  const currentTime = Date.now();
+  const timeSinceLastUpload = currentTime - (lastUploadTimestamp || 0);
+
+  if (timeSinceLastUpload > 60000) {
+    console.log('[Fillosophy] Profile may be stale, reloading...');
+    const activeProfileName = await getActiveProfile();
+    const reloadedProfile = await getProfile(activeProfileName);
+    if (reloadedProfile) {
+      currentProfile = reloadedProfile;
+      currentProfileName = activeProfileName;
+      console.log('[Fillosophy] Profile reloaded:', activeProfileName);
+    }
+  }
+
+  if (fieldMatchingCacheTimestamp && lastUploadTimestamp) {
+    if (lastUploadTimestamp > fieldMatchingCacheTimestamp) {
+      console.log('[Fillosophy] Field mapping is stale, forcing refresh');
+      fieldMapping = {};
+      fieldMatchingCacheTimestamp = null;
+      lastMatchTimestamp = null;
+    }
+  }
+
+  logProfileState();
 
   // ── Step 4: Collect full field labels ──────────────────────────────────────
   try {
@@ -1138,7 +1182,8 @@ async function previewMatch() {
 
     // ── Merge: template matches (high confidence) + AI matches ────────────
     fieldMapping       = { ...templateMatched, ...aiMapping };
-    lastMatchTimestamp  = Date.now();
+    fieldMatchingCacheTimestamp = Date.now();
+    lastMatchTimestamp  = fieldMatchingCacheTimestamp;
 
     // Recompute stats from the merged mapping
     const totalFields    = Object.keys(fieldMapping).length;
@@ -1199,6 +1244,27 @@ function wireAutofillButton() {
       const el = document.getElementById('autofill-tab-status');
       if (el) { el.textContent = msg; el.className = 'upload-status error'; }
     };
+
+    if (!currentProfile) {
+      showError("⚠ No profile loaded. Upload a resume first.");
+      return;
+    }
+
+    const activeProfileName = await getActiveProfile();
+    if (currentProfileName && activeProfileName && currentProfileName !== activeProfileName) {
+      console.warn(
+        `[Fillosophy] Profile mismatch detected!`,
+        `Using: ${currentProfileName}, Active: ${activeProfileName}`
+      );
+      const correctProfile = await getProfile(activeProfileName);
+      if (correctProfile) {
+        currentProfile = correctProfile;
+        currentProfileName = activeProfileName;
+        console.log('[Fillosophy] Profile corrected to:', activeProfileName);
+      }
+    }
+
+    logProfileState();
 
     // Guard 1 — mapping must exist
     if (!fieldMapping || Object.keys(fieldMapping).length === 0) {
