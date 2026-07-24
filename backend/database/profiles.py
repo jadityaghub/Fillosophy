@@ -4,23 +4,28 @@ Set DB_BACKEND=sqlite (default) or DB_BACKEND=supabase in .env
 to switch implementations. Routes always import from this file.
 """
 
+import logging
 import os
 
 from database.sqlite_db import SQLiteProfileDB
 from database.supabase_db import SupabaseProfileDB
 
+logger = logging.getLogger(__name__)
 DB_BACKEND = os.getenv("DB_BACKEND", "sqlite").lower()
 
 if DB_BACKEND == "supabase":
-    db = SupabaseProfileDB()
-    print("[Fillosophy DB] Using Supabase backend")
+    try:
+        db = SupabaseProfileDB()
+        print("[Fillosophy DB] Using Supabase cloud backend")
+    except Exception as exc:
+        print(f"[Fillosophy DB] Supabase init failed ({exc}) — falling back to SQLite")
+        db = SQLiteProfileDB()
 else:
     db = SQLiteProfileDB()
-    print("[Fillosophy DB] Using SQLite backend")
+    print("[Fillosophy DB] Using local SQLite backend")
 
 
 # ─── Top-level forwarding functions ───────────────────────────────────────────
-# Routes import these — never the concrete implementations directly.
 
 def init_db() -> None:
     return db.init_db()

@@ -77,7 +77,7 @@ let fieldMatchingCacheTimestamp = null;
  * without needing to pass DOM refs as arguments every time.
  * Populated in DOMContentLoaded.
  */
-let _tabBtns   = {};
+let _tabBtns = {};
 let _tabPanels = {};
 
 /**
@@ -146,16 +146,16 @@ document.addEventListener('DOMContentLoaded', () => {
   );
 
   // ── Upload tab elements ─────────────────────────────────
-  const dropzone        = document.getElementById('dropzone');
-  const fileInput       = document.getElementById('resume-file-input');
-  const dropzoneTitle   = document.getElementById('dropzone-title');
-  const dropzoneSub     = document.getElementById('dropzone-sub');
-  const extractBtn      = document.getElementById('extract-btn');
+  const dropzone = document.getElementById('dropzone');
+  const fileInput = document.getElementById('resume-file-input');
+  const dropzoneTitle = document.getElementById('dropzone-title');
+  const dropzoneSub = document.getElementById('dropzone-sub');
+  const extractBtn = document.getElementById('extract-btn');
   const extractBtnLabel = document.getElementById('extract-btn-label');
-  const uploadStatus    = document.getElementById('upload-status');
+  const uploadStatus = document.getElementById('upload-status');
 
   // ── Initial state ───────────────────────────────────────
-  extractBtn.disabled      = true;   // enabled only after a valid file is chosen
+  extractBtn.disabled = true;   // enabled only after a valid file is chosen
   uploadStatus.textContent = '';
 
   // ── Wire tabs ───────────────────────────────────────────
@@ -173,8 +173,10 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // ── Wire dropzone ───────────────────────────────────────
-  initDropzone({ dropzone, fileInput, dropzoneTitle, dropzoneSub,
-                 extractBtn, uploadStatus });
+  initDropzone({
+    dropzone, fileInput, dropzoneTitle, dropzoneSub,
+    extractBtn, uploadStatus
+  });
 
   // ── Wire extract button ────────────────────────────────────────
   // Nand redesign removed the profile-name select dropdown.
@@ -196,7 +198,7 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   // ── Wire import button + hidden file input ─────────────────────
-  const importBtn       = document.getElementById('import-btn');
+  const importBtn = document.getElementById('import-btn');
   const importFileInput = document.getElementById('import-file-input');
   if (importBtn && importFileInput) {
     importBtn.addEventListener('click', () => importFileInput.click());
@@ -227,8 +229,8 @@ document.addEventListener('DOMContentLoaded', () => {
  */
 function switchTab(tabId) {
   TAB_IDS.forEach((id) => {
-    const btn      = _tabBtns[id];
-    const panel    = _tabPanels[id];
+    const btn = _tabBtns[id];
+    const panel = _tabPanels[id];
     const isActive = id === tabId;
 
     if (!btn || !panel) {
@@ -288,11 +290,11 @@ async function renderProfileChips() {
 
   // Fetch saved profile names and the active one
   let profileNames = [];
-  let activeName   = null;
+  let activeName = null;
 
   try {
     profileNames = await listProfiles();
-    activeName   = await getActiveProfile();
+    activeName = await getActiveProfile();
   } catch (err) {
     console.warn('[Fillosophy] Failed to load profiles for chips:', err.message);
   }
@@ -391,8 +393,8 @@ async function handleChipSelect(name) {
     console.log(`[Fillosophy] Switched active profile to: ${name}`);
 
     // Invalidate cached field mapping — forces fresh match on next Autofill tab open
-    fieldMapping       = {};
-    lastMatchTimestamp  = null;
+    fieldMapping = {};
+    lastMatchTimestamp = null;
     console.log('[Fillosophy] Field mapping invalidated due to profile switch');
 
     setStatus(profilesTabStatus, '', '');
@@ -513,7 +515,7 @@ function setActiveProfileChip(profileName) {
  */
 function initDropzone(els) {
   const { dropzone, fileInput, dropzoneTitle, dropzoneSub,
-          extractBtn, uploadStatus } = els;
+    extractBtn, uploadStatus } = els;
 
   if (!dropzone || !fileInput) {
     console.warn('[Fillosophy Upload] Dropzone or file input not found.');
@@ -548,16 +550,20 @@ function initDropzone(els) {
     dropzone.classList.remove('dragover');
     const file = e.dataTransfer?.files?.[0];
     console.log(`[Fillosophy Upload] File dropped: ${file?.name ?? 'none'}`);
-    applyFileSelection(file, { dropzone, dropzoneTitle, dropzoneSub,
-                               extractBtn, uploadStatus });
+    applyFileSelection(file, {
+      dropzone, dropzoneTitle, dropzoneSub,
+      extractBtn, uploadStatus
+    });
   });
 
   // File picker selection
   fileInput.addEventListener('change', (e) => {
     const file = e.target.files?.[0];
     console.log(`[Fillosophy Upload] File selected via picker: ${file?.name ?? 'none'}`);
-    applyFileSelection(file, { dropzone, dropzoneTitle, dropzoneSub,
-                               extractBtn, uploadStatus });
+    applyFileSelection(file, {
+      dropzone, dropzoneTitle, dropzoneSub,
+      extractBtn, uploadStatus
+    });
     // Reset so the same file can be re-selected
     fileInput.value = '';
   });
@@ -594,7 +600,7 @@ function applyFileSelection(file, els) {
 
   dropzone.classList.add('has-file');
   dropzoneTitle.textContent = `✓ ${file.name}`;
-  dropzoneSub.textContent   = `${(file.size / 1024).toFixed(1)} KB · Click to change`;
+  dropzoneSub.textContent = `${(file.size / 1024).toFixed(1)} KB · Click to change`;
 
   extractBtn.disabled = false;
 }
@@ -761,11 +767,11 @@ async function handleExportJson() {
   };
 
   const jsonString = JSON.stringify(exportPayload, null, 2);
-  const filename   = `fillosophy_${activeProfileName.toLowerCase()}_${Date.now()}.json`;
+  const filename = `fillosophy_${activeProfileName.toLowerCase()}_${Date.now()}.json`;
 
   // ── Trigger download ──────────────────────────────────────────────────────
   const blob = new Blob([jsonString], { type: 'application/json' });
-  const url  = URL.createObjectURL(blob);
+  const url = URL.createObjectURL(blob);
 
   let downloadSucceeded = false;
 
@@ -792,8 +798,8 @@ async function handleExportJson() {
 
   // Fallback: temporary anchor element
   if (!downloadSucceeded) {
-    const a  = document.createElement('a');
-    a.href     = url;
+    const a = document.createElement('a');
+    a.href = url;
     a.download = filename;
     document.body.appendChild(a);
     a.click();
@@ -822,7 +828,7 @@ async function handleExportJson() {
  * @param {Event} event - The file-input 'change' event.
  */
 async function handleImportJson(event) {
-  const profilesStatus  = document.getElementById('profiles-tab-status');
+  const profilesStatus = document.getElementById('profiles-tab-status');
   const importFileInput = document.getElementById('import-file-input');
 
   // ── Guard: no file selected ───────────────────────────────────────────────
@@ -848,7 +854,7 @@ async function handleImportJson(event) {
     }
 
     // Validate profile_data has at least one expected key
-    const requiredKeys  = ['full_name', 'email', 'skills'];
+    const requiredKeys = ['full_name', 'email', 'skills'];
     const hasValidShape = requiredKeys.some((k) => k in parsed.profile_data);
     if (!hasValidShape) {
       throw new Error('File does not match Fillosophy profile format');
@@ -894,7 +900,7 @@ async function handleImportJson(event) {
   setActiveProfileChip(parsed.profile_name);
 
   // ── Invalidate cached field mapping (same as profile-switch logic) ────────
-  fieldMapping       = {};
+  fieldMapping = {};
   lastMatchTimestamp = null;
 
   // ── Show success ──────────────────────────────────────────────────────────
@@ -947,11 +953,11 @@ function displayProfile(profile) {
     ? profile.phone.full
     : profile.phone;
 
-  set('profile-field-name',   profile.full_name ?? '—');
-  set('profile-field-email',  profile.email     ?? '—');
-  set('profile-field-phone',  phoneDisplay      ?? '—');
-  set('profile-field-cgpa',   profile.cgpa      ?? '—');
-  set('profile-field-degree', profile.degree    ?? '—');
+  set('profile-field-name', profile.full_name ?? '—');
+  set('profile-field-email', profile.email ?? '—');
+  set('profile-field-phone', phoneDisplay ?? '—');
+  set('profile-field-cgpa', profile.cgpa ?? '—');
+  set('profile-field-degree', profile.degree ?? '—');
   set('profile-field-skills',
     Array.isArray(profile.skills)
       ? profile.skills.join(', ')
@@ -972,21 +978,21 @@ function displayProfile(profile) {
  */
 async function loadAutofillTab() {
   // Grab all the elements we'll update
-  const urlEl            = document.getElementById('current-page-url');
-  const fieldsFoundEl    = document.getElementById('stat-fields-found');
+  const urlEl = document.getElementById('current-page-url');
+  const fieldsFoundEl = document.getElementById('stat-fields-found');
   const highConfidenceEl = document.getElementById('stat-high-confidence');
-  const needsReviewEl    = document.getElementById('stat-needs-review');
-  const activeProfileEl  = document.getElementById('active-profile-name');
-  const autofillBtn      = document.getElementById('autofill-btn');
-  const tabStatus        = document.getElementById('autofill-tab-status');
+  const needsReviewEl = document.getElementById('stat-needs-review');
+  const activeProfileEl = document.getElementById('active-profile-name');
+  const autofillBtn = document.getElementById('autofill-btn');
+  const tabStatus = document.getElementById('autofill-tab-status');
 
   // ── Step 1: loading state ──────────────────────────────────────────────────
-  if (urlEl)         urlEl.textContent         = 'Scanning page…';
+  if (urlEl) urlEl.textContent = 'Scanning page…';
   if (fieldsFoundEl) fieldsFoundEl.textContent = '—';
   if (highConfidenceEl) highConfidenceEl.textContent = '—';
-  if (needsReviewEl)    needsReviewEl.textContent    = '—';
-  if (tabStatus)     { tabStatus.textContent = ''; tabStatus.className = 'upload-status'; }
-  if (autofillBtn)   autofillBtn.disabled      = true; // Disable until everything is ready
+  if (needsReviewEl) needsReviewEl.textContent = '—';
+  if (tabStatus) { tabStatus.textContent = ''; tabStatus.className = 'upload-status'; }
+  if (autofillBtn) autofillBtn.disabled = true; // Disable until everything is ready
 
   const previewSection = document.getElementById('autofill-preview-section');
   if (previewSection) previewSection.style.display = 'none';
@@ -999,10 +1005,10 @@ async function loadAutofillTab() {
     }
   } catch (pingErr) {
     console.warn('[Fillosophy] PING_CONTENT failed:', pingErr.message);
-    if (urlEl)     urlEl.textContent     = 'Unavailable';
+    if (urlEl) urlEl.textContent = 'Unavailable';
     if (tabStatus) {
       tabStatus.textContent = '⚠ Fillosophy cannot access this page. Navigate to a website with a form and try again.';
-      tabStatus.className   = 'upload-status error';
+      tabStatus.className = 'upload-status error';
     }
     if (autofillBtn) autofillBtn.disabled = true;
     return; // abort — no point calling GET_PAGE_INFO or DETECT_FIELDS
@@ -1019,10 +1025,10 @@ async function loadAutofillTab() {
     console.log(`[Fillosophy] Page info loaded — ${pageInfo.fieldCount} field(s) on ${currentPageUrl}`);
   } catch (pageErr) {
     console.warn('[Fillosophy] GET_PAGE_INFO failed:', pageErr.message);
-    if (urlEl)       urlEl.textContent       = 'Unavailable';
+    if (urlEl) urlEl.textContent = 'Unavailable';
     if (tabStatus) {
       tabStatus.textContent = '⚠ Fillosophy cannot read this page. Try refreshing or navigate to a page with a form.';
-      tabStatus.className   = 'upload-status error';
+      tabStatus.className = 'upload-status error';
     }
     if (autofillBtn) autofillBtn.disabled = true;
     return;
@@ -1041,7 +1047,7 @@ async function loadAutofillTab() {
       if (activeProfileEl) activeProfileEl.textContent = 'None';
       if (tabStatus) {
         tabStatus.textContent = '⚠ No profile loaded. Upload a resume first.';
-        tabStatus.className   = 'upload-status error';
+        tabStatus.className = 'upload-status error';
       }
       if (autofillBtn) autofillBtn.disabled = true;
       console.warn('[Fillosophy] No active profile found in storage.');
@@ -1052,7 +1058,7 @@ async function loadAutofillTab() {
     if (activeProfileEl) activeProfileEl.textContent = 'Unknown';
     if (tabStatus) {
       tabStatus.textContent = '⚠ Could not load profile data.';
-      tabStatus.className   = 'upload-status error';
+      tabStatus.className = 'upload-status error';
     }
     if (autofillBtn) autofillBtn.disabled = true;
     return;
@@ -1094,7 +1100,7 @@ async function loadAutofillTab() {
       if (fieldsFoundEl) fieldsFoundEl.textContent = '0';
       if (tabStatus) {
         tabStatus.textContent = '⚠ No form fields detected on this page.';
-        tabStatus.className   = 'upload-status error';
+        tabStatus.className = 'upload-status error';
       }
       if (autofillBtn) autofillBtn.disabled = true;
       console.log('[Fillosophy] No fields detected — autofill disabled');
@@ -1104,7 +1110,7 @@ async function loadAutofillTab() {
     console.warn('[Fillosophy] collectFieldLabels failed:', labelErr.message);
     if (tabStatus) {
       tabStatus.textContent = '⚠ Failed to detect form fields on this page.';
-      tabStatus.className   = 'upload-status error';
+      tabStatus.className = 'upload-status error';
     }
     if (autofillBtn) autofillBtn.disabled = true;
     return;
@@ -1135,13 +1141,13 @@ async function previewMatch() {
   if (fieldLabels.length === 0 || !currentProfile) return;
 
   const highConfidenceEl = document.getElementById('stat-high-confidence');
-  const needsReviewEl    = document.getElementById('stat-needs-review');
-  const tabStatus        = document.getElementById('autofill-tab-status');
-  const autofillBtn      = document.getElementById('autofill-btn');
-  const fieldsFoundEl    = document.getElementById('stat-fields-found');
+  const needsReviewEl = document.getElementById('stat-needs-review');
+  const tabStatus = document.getElementById('autofill-tab-status');
+  const autofillBtn = document.getElementById('autofill-btn');
+  const fieldsFoundEl = document.getElementById('stat-fields-found');
 
   if (highConfidenceEl) highConfidenceEl.textContent = '...';
-  if (needsReviewEl)    needsReviewEl.textContent    = '...';
+  if (needsReviewEl) needsReviewEl.textContent = '...';
 
   try {
     // ── Step A: Try template matching first ──────────────────────────────────
@@ -1149,18 +1155,18 @@ async function previewMatch() {
 
     if (templateResult && templateResult.unmatched.length === 0) {
       // ── Fully matched via template — skip AI entirely ─────────────────────
-      fieldMapping       = templateResult.matched;
+      fieldMapping = templateResult.matched;
       lastMatchTimestamp = Date.now();
 
-      const totalFields    = Object.keys(fieldMapping).length;
+      const totalFields = Object.keys(fieldMapping).length;
 
-      if (fieldsFoundEl)    fieldsFoundEl.textContent    = totalFields;
+      if (fieldsFoundEl) fieldsFoundEl.textContent = totalFields;
       if (highConfidenceEl) highConfidenceEl.textContent = totalFields;
-      if (needsReviewEl)    needsReviewEl.textContent    = 0;
+      if (needsReviewEl) needsReviewEl.textContent = 0;
 
       if (tabStatus) {
         tabStatus.textContent = `✓ All ${totalFields} field(s) matched via template (no AI needed).`;
-        tabStatus.className   = 'upload-status success';
+        tabStatus.className = 'upload-status success';
       }
       if (autofillBtn) autofillBtn.disabled = false;
 
@@ -1171,8 +1177,8 @@ async function previewMatch() {
     }
 
     // ── Step B: Partial or no template match — call AI /match ────────────────
-    const templateMatched    = templateResult?.matched  ?? {};
-    const fieldsForAI        = templateResult?.unmatched ?? fieldLabels;
+    const templateMatched = templateResult?.matched ?? {};
+    const fieldsForAI = templateResult?.unmatched ?? fieldLabels;
     const templateMatchCount = Object.keys(templateMatched).length;
 
     if (templateMatchCount > 0) {
@@ -1180,10 +1186,10 @@ async function previewMatch() {
     }
 
     const response = await fetch('http://localhost:8000/match/', {
-      method:  'POST',
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({
-        fields:  fieldsForAI,
+      body: JSON.stringify({
+        fields: fieldsForAI,
         profile: currentProfile,
       }),
     });
@@ -1192,28 +1198,28 @@ async function previewMatch() {
       throw new Error(`Match API returned HTTP ${response.status}`);
     }
 
-    const data     = await response.json();
+    const data = await response.json();
     const aiMapping = data.mapping || {};
 
     // ── Merge: template matches (high confidence) + AI matches ────────────
-    fieldMapping       = { ...templateMatched, ...aiMapping };
+    fieldMapping = { ...templateMatched, ...aiMapping };
     fieldMatchingCacheTimestamp = Date.now();
-    lastMatchTimestamp  = fieldMatchingCacheTimestamp;
+    lastMatchTimestamp = fieldMatchingCacheTimestamp;
 
     // Recompute stats from the merged mapping
-    const totalFields    = Object.keys(fieldMapping).length;
+    const totalFields = Object.keys(fieldMapping).length;
     const highConfidence = Object.values(fieldMapping)
       .filter((m) => (m.confidence ?? 0) >= 80).length;
-    const needsReview    = totalFields - highConfidence;
+    const needsReview = totalFields - highConfidence;
 
-    if (fieldsFoundEl)    fieldsFoundEl.textContent    = totalFields;
+    if (fieldsFoundEl) fieldsFoundEl.textContent = totalFields;
     if (highConfidenceEl) highConfidenceEl.textContent = highConfidence;
-    if (needsReviewEl)    needsReviewEl.textContent    = needsReview;
+    if (needsReviewEl) needsReviewEl.textContent = needsReview;
 
     if (needsReview > 0) {
       if (tabStatus) {
         tabStatus.textContent = `⚠ ${needsReview} field(s) will be flagged for review.`;
-        tabStatus.className   = 'upload-status amber';
+        tabStatus.className = 'upload-status amber';
       }
     } else {
       if (tabStatus) {
@@ -1221,7 +1227,7 @@ async function previewMatch() {
           ? ` (${templateMatchCount} via template)`
           : '';
         tabStatus.textContent = `✓ All fields matched with high confidence${extra}.`;
-        tabStatus.className   = 'upload-status success';
+        tabStatus.className = 'upload-status success';
       }
     }
 
@@ -1234,7 +1240,7 @@ async function previewMatch() {
     console.error('[Fillosophy] Match preview failed:', err);
     if (tabStatus) {
       tabStatus.textContent = '⚠️ The backend server is offline. Please start it to map fields.';
-      tabStatus.className   = 'upload-status error';
+      tabStatus.className = 'upload-status error';
     }
     if (autofillBtn) autofillBtn.disabled = true;
   }
@@ -1293,7 +1299,7 @@ function wireAutofillButton() {
     }
 
     // Loading state
-    freshBtn.disabled    = true;
+    freshBtn.disabled = true;
     freshBtn.textContent = 'Filling form…';
     // Always re-query — the clone swap may have detached the old reference
     const getStatus = () => document.getElementById('autofill-tab-status');
@@ -1303,11 +1309,11 @@ function wireAutofillButton() {
     try {
       const res = await sendMessage('APPLY_AUTOFILL', {
         mapping: fieldMapping,
-        fields:  detectedFields
+        fields: detectedFields
       });
 
       const summary = res?.summary ?? {};
-      const filled  = summary.filled  ?? 0;
+      const filled = summary.filled ?? 0;
       const flagged = summary.flagged ?? 0;
 
       // Update stats row with post-fill numbers
@@ -1321,13 +1327,13 @@ function wireAutofillButton() {
       if (st2) {
         if (filled === 0 && flagged === 0) {
           st2.textContent = `⚠ No fields could be matched to your profile. Try re-scanning or check your profile.`;
-          st2.className   = 'upload-status amber';
+          st2.className = 'upload-status amber';
         } else if (flagged > 0) {
           st2.textContent = `✓ Filled ${filled} field(s). ${flagged} flagged for your review on the page.`;
-          st2.className   = 'upload-status amber';
+          st2.className = 'upload-status amber';
         } else {
           st2.textContent = `✓ All ${filled} field(s) filled successfully!`;
-          st2.className   = 'upload-status success';
+          st2.className = 'upload-status success';
         }
       }
 
@@ -1338,10 +1344,10 @@ function wireAutofillButton() {
       const st3 = getStatus();
       if (st3) {
         st3.textContent = `✗ Autofill failed. ${err.message}`;
-        st3.className   = 'upload-status error';
+        st3.className = 'upload-status error';
       }
     } finally {
-      freshBtn.disabled    = false;
+      freshBtn.disabled = false;
       freshBtn.textContent = 'Autofill This Form';
     }
   });
@@ -1373,11 +1379,11 @@ async function collectFieldLabels() {
 
   // Build the label list using the specified priority order
   const labels = detectedFields.map((d) =>
-    d.label       ??
+    d.label ??
     d.placeholder ??
-    d.ariaLabel   ??
-    d.name        ??
-    d.id          ??
+    d.ariaLabel ??
+    d.name ??
+    d.id ??
     `field_${d.index}`
   );
 
@@ -1399,7 +1405,7 @@ async function collectFieldLabels() {
 function setStatus(el, message, type) {
   if (!el) return;
   el.textContent = message;
-  el.className   = `upload-status${type ? ` ${type}` : ''}`;
+  el.className = `upload-status${type ? ` ${type}` : ''}`;
 }
 
 /**
@@ -1412,7 +1418,7 @@ function setStatus(el, message, type) {
  * @param {boolean}           isLoading
  */
 function setLoadingState(btn, labelEl, isLoading) {
-  if (labelEl) labelEl.textContent  = isLoading ? 'Extracting…' : 'Extract & Save Profile';
+  if (labelEl) labelEl.textContent = isLoading ? 'Extracting…' : 'Extract & Save Profile';
   // Only force-disable on entry; re-enable decisions are made by the caller
   if (isLoading) btn.disabled = true;
 }

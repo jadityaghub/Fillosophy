@@ -1,91 +1,97 @@
-# Switching Fillosophy to Supabase
+# Switching Fillosophy to Supabase Cloud Database
 
-## Why Supabase?
+## Overview
 
-SQLite stores profiles in a local file (`fillosophy.db`) on the device
-running the backend. Supabase stores profiles in a hosted PostgreSQL
-database, making them accessible from any device.
+Fillosophy supports dual database backends:
+- **SQLite** (`DB_BACKEND=sqlite`): Default local file storage (`fillosophy.db`).
+- **Supabase** (`DB_BACKEND=supabase`): Cloud-hosted PostgreSQL database for multi-device sync.
 
 ---
 
-## Step 1 — Create a Supabase project
+## Step 1 — Create a Supabase Project
 
-1. Go to <https://supabase.com> and create a free account
+1. Sign up at <https://supabase.com>
 2. Create a new project
-3. Go to **Settings → API** and copy:
+3. Navigate to **Project Settings → API** and copy:
    - **Project URL** → `SUPABASE_URL`
-   - **anon/public key** → `SUPABASE_KEY`
+   - **anon / public key** → `SUPABASE_KEY`
 
 ---
 
-## Step 2 — Create the profiles table
+## Step 2 — Run the Consolidated Database Schema
 
-Run this SQL in the **Supabase SQL Editor**:
+1. Open the **SQL Editor** in your Supabase dashboard
+2. Copy and run the contents of [`database/schema.sql`](database/schema.sql):
 
 ```sql
-CREATE TABLE IF NOT EXISTS profiles (
+-- Consolidated Fillosophy Profiles Table
+CREATE TABLE IF NOT EXISTS public.profiles (
     id         BIGSERIAL PRIMARY KEY,
     name       TEXT UNIQUE NOT NULL,
     data       JSONB NOT NULL,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- Unique index for fast profile lookup by name
+CREATE UNIQUE INDEX IF NOT EXISTS idx_profiles_name ON public.profiles(name);
+
+-- Updated_at trigger function
+CREATE OR REPLACE FUNCTION update_updated_at_column()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ LANGUAGE 'plpgsql';
+
+CREATE OR REPLACE TRIGGER update_profiles_updated_at
+    BEFORE UPDATE ON public.profiles
+    FOR EACH ROW
+    EXECUTE FUNCTION update_updated_at_column();
+
+-- Enable Row Level Security (RLS)
+ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Allow full access to profiles" ON public.profiles
+    FOR ALL USING (true) WITH CHECK (true);
 ```
 
 ---
 
-## Step 3 — Install supabase-py
+## Step 3 — Install Dependencies
 
 ```bash
-pip install supabase
+pip install -r requirements.txt
 ```
-
-Add `supabase` to `requirements.txt`.
+*(Includes `supabase>=2.0.0`)*
 
 ---
 
-## Step 4 — Implement supabase_db.py
+## Step 4 — Configure Environment Variables
 
-Replace the `NotImplementedError` stubs in
-[`database/supabase_db.py`](database/supabase_db.py)
-with real Supabase client calls:
-
-```python
-from supabase import create_client
-
-# In __init__:
-self.client = create_client(self.url, self.key)
-
-# save_profile
-self.client.table("profiles").upsert(
-    {"name": name, "data": data}
-).execute()
-
-# get_profile
-result = self.client.table("profiles") \
-    .select("data").eq("name", name).execute()
-return result.data[0]["data"] if result.data else None
-
-# list_profiles
-result = self.client.table("profiles").select("name").execute()
-return [row["name"] for row in result.data]
-
-# delete_profile
-self.client.table("profiles").delete().eq("name", name).execute()
-```
-
----
-
-## Step 5 — Switch the backend
-
-In your `.env` file, change:
+In `backend/.env`, set:
 
 ```env
 DB_BACKEND=supabase
+SUPABASE_URL=https://your-project-id.supabase.co
+SUPABASE_KEY=your_supabase_anon_or_service_key
 ```
 
-Restart the backend. The selector in
-[`database/profiles.py`](database/profiles.py)
-will automatically route all calls to `SupabaseProfileDB`.
+---
 
-SQLite is untouched and can be switched back at any time by
-setting `DB_BACKEND=sqlite`.
+## Step 5 — Verify
+
+Start the FastAPI backend:
+
+```bash
+uvicorn main:app --reload --port 8000
+```
+
+You will see:
+```text
+[Fillosophy DB] Using Supabase cloud backend
+[Fillosophy Supabase] Connected to Supabase at https://your-project-id...
+```
+
+You can toggle back to local SQLite at any time by setting `DB_BACKEND=sqlite`.
